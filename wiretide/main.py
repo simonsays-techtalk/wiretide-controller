@@ -58,5 +58,4 @@ app.include_router(logs.router)
 app.include_router(clients.router)
 
 # Static file serving
-app.mount("/static", StaticFiles(directory="wiretide/static"), name="static")
 app.mount("/", StaticFiles(directory="/var/www/html", html=True), name="agent_files")
