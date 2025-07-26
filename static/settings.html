@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Settings{% endblock %}
+
+{% block content %}
+<div class="flex flex-col md:flex-row md:space-x-8">
+  <!-- Sidebar (Vertical Tabs) -->
+  <aside class="w-full md:w-64 mb-4 md:mb-0">
+    <nav class="space-y-2">
+      <a href="#token" class="tab-link block px-4 py-2 rounded hover:bg-gray-200 dark:hover:bg-gray-700 font-medium text-gray-800 dark:text-gray-200" id="tab-token">Token</a>
+      <a href="#users" class="tab-link block px-4 py-2 rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-400" id="tab-users">Users</a>
+      <a href="#system" class="tab-link block px-4 py-2 rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-400" id="tab-system">System</a>
+      <a href="#backup" class="tab-link block px-4 py-2 rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-400" id="tab-backup">Backup & Restore</a>
+      <a href="#logging" class="tab-link block px-4 py-2 rounded hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-400" id="tab-logging">Logging</a>
+    </nav>
+  </aside>
+
+  <!-- Tab Content Area -->
+  <section class="flex-1">
+    {% include "settings/token.html" %}
+    {% include "settings/users.html" %}
+    {% include "settings/system.html" %}
+    {% include "settings/backup.html" %}
+    {% include "settings/logging.html" %}
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  document.addEventListener("DOMContentLoaded", () => {
+    const links = document.querySelectorAll(".tab-link");
+    const tabs = document.querySelectorAll("section > div");
+
+    links.forEach(link => {
+      link.addEventListener("click", e => {
+        e.preventDefault();
+        const id = link.getAttribute("href").substring(1);
+
+        // Hide all tab panels
+        tabs.forEach(tab => tab.classList.add("hidden"));
+        document.getElementById(id).classList.remove("hidden");
+
+        // Reset tab styles
+        links.forEach(a => {
+          a.classList.remove("font-medium", "text-gray-800", "dark:text-gray-200");
+          a.classList.add("text-gray-600", "dark:text-gray-400");
+        });
+
+        // Activate clicked tab
+        link.classList.remove("text-gray-600", "dark:text-gray-400");
+        link.classList.add("font-medium", "text-gray-800", "dark:text-gray-200");
+      });
+    });
+  });
+</script>
+{% endblock %}

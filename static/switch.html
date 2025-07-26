@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Router Config - {{ device.hostname }}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="p-6 bg-gray-100 font-sans">
+  <h1 class="text-2xl font-bold mb-4">Router: {{ device.hostname }}</h1>
+
+  <div class="bg-white p-4 rounded shadow space-y-2">
+    <p><strong>MAC:</strong> {{ device.mac }}</p>
+    <p><strong>IP:</strong> {{ device.ip }}</p>
+    <p><strong>SSH:</strong> {{ "Enabled" if device.ssh_enabled else "Disabled" }}</p>
+
+    <h2 class="text-xl font-semibold mt-4">Configuration</h2>
+    <form method="post" action="/clients/router/{{ device.mac }}/update" class="space-y-2">
+      <label class="block">
+        <span class="text-sm">Hostname</span>
+        <input name="hostname" value="{{ device.hostname }}" class="border p-2 rounded w-full">
+      </label>
+      <button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded">Save</button>
+    </form>
+  </div>
+
+  {% if status %}
+    <div class="bg-white p-4 mt-6 rounded shadow">
+      <h2 class="text-xl font-semibold mb-2">Live Device Status</h2>
+      <table class="table-auto border w-full text-sm">
+        <tbody>
+          <tr>
+            <td class="p-2 border font-medium">Model</td>
+            <td class="p-2 border">{{ status.model or '—' }}</td>
+          </tr>
+          <tr>
+            <td class="p-2 border font-medium">LAN IP</td>
+            <td class="p-2 border">{{ device.ip }}</td>
+          </tr>
+          <tr>
+            <td class="p-2 border font-medium">WAN IP</td>
+            <td class="p-2 border">{{ status.wan_ip or '—' }}</td>
+          </tr>
+          <tr>
+            <td class="p-2 border font-medium">DNS Servers</td>
+            <td class="p-2 border">
+              {% if status.dns_servers %}
+                {{ status.dns_servers | join(", ") }}
+              {% else %}
+                —
+              {% endif %}
+            </td>
+          </tr>
+          <tr>
+            <td class="p-2 border font-medium">Firewall</td>
+            <td class="p-2 border">{{ 'Enabled' if status.firewall_state == 'True' else 'Disabled' }}</td>
+          </tr>
+          <tr>
+            <td class="p-2 border font-medium">NTP</td>
+            <td class="p-2 border">{{ 'Enabled' if status.ntp_synced else 'Disabled' }}</td>
+          </tr>
+          <tr>
+            <td class="p-2 border font-medium">Last Updated</td>
+            <td class="p-2 border">{{ status.updated_at }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
+</body>
+</html>
