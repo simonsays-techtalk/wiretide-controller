@@ -12,10 +12,10 @@ router = APIRouter()
 
 # --- Token verification ---
 async def require_api_token(request: Request):
-    """Validates X-API-Token or Bearer token for agent API endpoints."""
+    """Validate token for device API endpoints (/register, /status)."""
     token = request.headers.get("X-API-Token")
     if not token:
-        # Fallback for existing Bearer header (to support /status agent)
+        # Backward compatibility with Authorization: Bearer <token>
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
             token = auth_header[len("Bearer "):].strip()
@@ -27,8 +27,8 @@ async def require_api_token(request: Request):
         cursor = await db.execute("SELECT token FROM tokens WHERE token = ?", (token,))
         row = await cursor.fetchone()
         if not row:
-            raise HTTPException(status_code=403, detail="Invalid API token
-
+            raise HTTPException(status_code=403, detail="Invalid API token")
+            
 # --- Token verification ---
 async def verify_api_token(request: Request):
     """Verify API token from X-API-Token header for device endpoints."""
