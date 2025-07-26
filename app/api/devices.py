@@ -32,7 +32,6 @@ class DeviceType(str, enum.Enum):
     access_point = "access_point"
 
 # --- Endpoints ---
-
 @router.post("/register")
 async def register_device(device: DeviceRegistration, request: Request, _: str = Depends(require_api_token)):
     ip = request.client.host
@@ -60,7 +59,6 @@ async def register_device(device: DeviceRegistration, request: Request, _: str =
 async def device_status(status: DeviceStatus, request: Request, _: str = Depends(require_api_token)):
     client_ip = request.client.host
     now = datetime.utcnow().isoformat()
-
     mac_lower = status.mac.lower()
 
     async with aiosqlite.connect(DB_PATH) as db:
