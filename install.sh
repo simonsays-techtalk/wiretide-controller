@@ -36,7 +36,9 @@ deactivate
 # Initialize database (creates admin user)
 if [ ! -f "$DB_FILE" ]; then
     echo "[*] Creating SQLite database..."
-    $PYTHON_BIN db_init.py
+    source venv/bin/activate
+    python db_init.py
+    deactivate
 fi
 
 # Generate pre-shared token for API if none exists
