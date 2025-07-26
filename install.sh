@@ -11,7 +11,10 @@ PYTHON_BIN="/usr/bin/python3"
 echo "[*] Installing Wiretide Controller..."
 
 # Install system dependencies
-apt update && apt install -y nginx python3-venv python3-pip sqlite3 openssl git
+apt update && apt install -y nginx python3-venv python3-pip sqlite3 openssl git curl
+
+# Ensure Git won't block operations due to ownership
+git config --global --add safe.directory "$WIRETIDE_DIR" || true
 
 # Clone or update repository
 mkdir -p "$WIRETIDE_DIR" "$CERT_DIR"
@@ -22,10 +25,7 @@ else
     git pull
 fi
 
-# Ensure Git doesn't complain about ownership (safe.directory)
-git config --global --add safe.directory "$WIRETIDE_DIR"
-
-# Make repo owned by www-data so service can write logs/config
+# Make repo owned by www-data so service can use it
 chown -R www-data:www-data "$WIRETIDE_DIR"
 
 cd "$WIRETIDE_DIR"
@@ -35,7 +35,7 @@ if [ ! -d venv ]; then
     $PYTHON_BIN -m venv venv
 fi
 
-# Make sure venv is writable by service user
+# Ensure venv is writable by service user
 chown -R www-data:www-data "$WIRETIDE_DIR/venv"
 
 # Install Python dependencies
@@ -52,7 +52,7 @@ if [ ! -f "$DB_FILE" ]; then
     deactivate
 fi
 
-# Fix DB and folder permissions for SQLite (locks/journals)
+# Fix DB and folder permissions (SQLite needs write access for locks)
 DB_DIR=$(dirname "$DB_FILE")
 chown -R www-data:www-data "$DB_FILE" "$DB_DIR"
 chmod -R 775 "$DB_DIR"
@@ -91,6 +91,16 @@ systemctl enable --now wiretide.service
 cp nginx.conf /etc/nginx/sites-available/wiretide
 ln -sf /etc/nginx/sites-available/wiretide /etc/nginx/sites-enabled/wiretide
 systemctl restart nginx
+
+# Health check
+echo "[*] Checking if Wiretide service is running..."
+sleep 3
+if ! curl -sk https://127.0.0.1/ > /dev/null; then
+    echo "[!] Wiretide service might not be running correctly. Showing logs:"
+    journalctl -u wiretide --no-pager -n 50
+else
+    echo "[*] Wiretide is up and reachable locally."
+fi
 
 # Show connection info
 IP=$(hostname -I | awk '{print $1}')
