@@ -7,7 +7,6 @@ DB_PATH = "/opt/wiretide/wiretide.db"
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 def hash_password(password: str) -> str:
-    # Simple SHA256 for now (upgrade to bcrypt later)
     return hashlib.sha256(password.encode('utf-8')).hexdigest()
 
 conn = sqlite3.connect(DB_PATH)
@@ -34,7 +33,7 @@ CREATE TABLE IF NOT EXISTS tokens (
 );
 """)
 
-# Users table (for admin login)
+# Users table
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -43,7 +42,7 @@ CREATE TABLE IF NOT EXISTS users (
 );
 """)
 
-# Seed default admin if not exists
+# Default admin user
 cursor.execute("SELECT COUNT(*) FROM users WHERE username='admin'")
 if cursor.fetchone()[0] == 0:
     cursor.execute(
