@@ -5,12 +5,12 @@ WIRETIDE_DIR="/opt/wiretide"
 CERT_DIR="/etc/wiretide/certs"
 DB_FILE="$WIRETIDE_DIR/wiretide.db"
 LOG_FILE="/var/log/wiretide.log"
-REPO_URL="https://github.com/simonsays-techtalk/wiretide-controller.git"
+REPO_URL="https://github.com/<your-repo>/wiretide-controller.git"
 PYTHON_BIN="/usr/bin/python3"
 
 echo "[*] Installing Wiretide Controller..."
 
-# Update and install system dependencies
+# Install system dependencies
 apt update && apt install -y nginx python3-venv python3-pip sqlite3 openssl git
 
 # Clone or update repository
@@ -22,34 +22,23 @@ else
     git pull
 fi
 
-# Create and prepare virtual environment
 cd "$WIRETIDE_DIR"
+
+# Create virtual environment if missing
 if [ ! -d venv ]; then
     $PYTHON_BIN -m venv venv
 fi
 
-# Ensure venv ownership matches service user (www-data) so installs work
+# Make sure venv is writable by service user
 chown -R www-data:www-data "$WIRETIDE_DIR/venv"
 
-# Install dependencies
+# Install Python dependencies
 source venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
 deactivate
 
-# Ensure log file exists and is writable
-mkdir -p "$(dirname "$LOG_FILE")"
-touch "$LOG_FILE"
-chown www-data:www-data "$LOG_FILE"
-chmod 664 "$LOG_FILE"
-
-# Fix DB and folder permissions
-mkdir -p "$(dirname "$DB_FILE")"
-touch "$DB_FILE"
-chown -R www-data:www-data "$(dirname "$DB_FILE")"
-chmod -R 775 "$(dirname "$DB_FILE")"
-
-# Initialize SQLite database (run inside venv so bcrypt is available)
+# Initialize database if it doesn't exist
 if [ ! -f "$DB_FILE" ]; then
     echo "[*] Creating SQLite database..."
     source venv/bin/activate
@@ -57,8 +46,20 @@ if [ ! -f "$DB_FILE" ]; then
     deactivate
 fi
 
+# Ensure DB and folder permissions (required for SQLite locking)
+DB_DIR=$(dirname "$DB_FILE")
+chown -R www-data:www-data "$DB_FILE" "$DB_DIR"
+chmod -R 775 "$DB_DIR"
+chmod 664 "$DB_FILE"
+
+# Ensure log file exists and is writable
+mkdir -p "$(dirname "$LOG_FILE")"
+touch "$LOG_FILE"
+chown www-data:www-data "$LOG_FILE"
+chmod 664 "$LOG_FILE"
+
 # Generate default API token if none exists
-API_TOKEN=$(sqlite3 "$DB_FILE" "SELECT token FROM tokens LIMIT 1;")
+API_TOKEN=$(sqlite3 "$DB_FILE" "SELECT token FROM tokens LIMIT 1;" || true)
 if [ -z "$API_TOKEN" ]; then
     API_TOKEN=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 32)
     sqlite3 "$DB_FILE" "INSERT INTO tokens (token, description) VALUES ('$API_TOKEN', 'Default API Token');"
@@ -75,7 +76,7 @@ if [ ! -f "$CERT_DIR/wiretide.crt" ]; then
       -subj "/CN=wiretide"
 fi
 
-# Install and enable systemd service
+# Install systemd service
 cp wiretide.service /etc/systemd/system/wiretide.service
 systemctl daemon-reload
 systemctl enable --now wiretide.service
@@ -85,7 +86,7 @@ cp nginx.conf /etc/nginx/sites-available/wiretide
 ln -sf /etc/nginx/sites-available/wiretide /etc/nginx/sites-enabled/wiretide
 systemctl restart nginx
 
-# Display connection details
+# Show connection info
 IP=$(hostname -I | awk '{print $1}')
 echo "==========================================="
 echo " Wiretide Controller Installed Successfully"
@@ -95,3 +96,4 @@ echo "Username: admin"
 echo "Password: wiretide"
 echo "API Token (for agents): $API_TOKEN"
 echo "==========================================="
+
