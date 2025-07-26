@@ -1,4 +1,6 @@
 fastapi
 uvicorn[standard]
 jinja2
-sqlite3-bro
+passlib[bcrypt]
+aiosqlite
+python-dotenv
