@@ -1,0 +1,204 @@
+{# templates/index.html #}
+{% extends "base.html" %}
+
+{% block title %}Clients{% endblock %}
+
+{% block content %}
+<h1 class="text-2xl font-semibold mb-4">Connected Devices</h1>
+<div id="device-table" class="bg-white dark:bg-gray-800 shadow rounded p-4">
+  <p class="text-gray-500 dark:text-gray-300">Loading...</p>
+</div>
+
+<!-- Modal -->
+<div id="approve-modal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center hidden z-50">
+  <div class="bg-white dark:bg-gray-800 rounded p-6 shadow-lg w-96 space-y-4">
+    <h2 class="text-xl font-semibold">Approve Device</h2>
+    <input type="hidden" id="approve-mac" />
+    <label class="block">
+      <span class="text-sm text-gray-700 dark:text-gray-200">Select device type</span>
+      <select id="approve-type" class="w-full p-2 border rounded mt-1 dark:bg-gray-700 dark:text-white">
+        <option value="unknown">-- Choose --</option>
+        <option value="router">Router</option>
+        <option value="switch">Switch</option>
+        <option value="firewall">Firewall</option>
+        <option value="access_point">Access Point</option>
+      </select>
+    </label>
+    <div class="flex justify-end space-x-2">
+      <button onclick="closeModal()" class="px-4 py-2 bg-gray-300 dark:bg-gray-600 rounded">Cancel</button>
+      <button onclick="submitApproval()" class="px-4 py-2 bg-blue-600 text-white rounded">Approve</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function toggleTheme() {
+    const html = document.documentElement;
+    const isDark = html.classList.contains("dark");
+    html.classList.toggle("dark");
+    localStorage.theme = isDark ? "light" : "dark";
+  }
+
+  document.getElementById("user-menu-btn").addEventListener("click", () => {
+    document.getElementById("user-dropdown").classList.toggle("hidden");
+  });
+
+  document.addEventListener("click", (e) => {
+    const btn = document.getElementById("user-menu-btn");
+    const dropdown = document.getElementById("user-dropdown");
+    if (!btn.contains(e.target) && !dropdown.contains(e.target)) {
+      dropdown.classList.add("hidden");
+    }
+  });
+
+  let currentApproveMac = "";
+
+  async function loadDevices() {
+    try {
+      const res = await fetch("/api/devices");
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const devices = await res.json();
+      if (!Array.isArray(devices)) throw new Error("Response is not an array");
+
+      const table = document.createElement("table");
+      table.className = "min-w-full text-sm table-auto border";
+
+      table.innerHTML = `
+        <thead>
+          <tr class="bg-gray-100 dark:bg-gray-700 text-left">
+            <th class="p-2 border">Hostname</th>
+            <th class="p-2 border">MAC</th>
+            <th class="p-2 border">IP</th>
+            <th class="p-2 border">Last Seen</th>
+            <th class="p-2 border">SSH</th>
+            <th class="p-2 border">Status</th>
+            <th class="p-2 border">Type</th>
+            <th class="p-2 border">Actions</th>
+          </tr>
+        </thead>
+        <tbody>` +
+        devices.map(d => {
+          let actions = [];
+          if (d.status === "waiting" && d.ssh_enabled) {
+            actions.push(`<button onclick="openApproveModal('${d.mac}')" class="text-blue-600 underline">Approve</button>`);
+          } else if (d.status === "waiting") {
+            actions.push(`<span class="text-gray-400 italic">SSH Off</span>`);
+          }
+          if (d.status === "waiting") {
+            actions.push(`<button onclick="denyDevice('${d.mac}')" class="text-yellow-600 underline">Deny</button>`);
+          }
+          if (["waiting", "denied", "approved"].includes(d.status)) {
+            actions.push(`<button onclick="blockDevice('${d.mac}')" class="text-red-600 underline">Block</button>`);
+            actions.push(`<button onclick="removeDevice('${d.mac}')" class="text-gray-600 underline">Remove</button>`);
+          }
+
+          return `
+            <tr>
+              <td class="p-2 border">
+                ${d.status === "approved"
+                  ? `<a href="/clients/${d.device_type}/${encodeURIComponent(d.mac)}" class="text-blue-600 underline">${d.hostname}</a>`
+                  : d.hostname}
+              </td>
+              <td class="p-2 border">${d.mac}</td>
+              <td class="p-2 border">${d.ip}</td>
+              <td class="p-2 border">${d.last_seen}</td>
+              <td class="p-2 border">${d.ssh_enabled ? '✅' : '❌'}</td>
+              <td class="p-2 border">${d.status}</td>
+              <td class="p-2 border">${d.device_type || 'unknown'}</td>
+              <td class="p-2 border space-x-2">${actions.join(" ")}</td>
+            </tr>`;
+        }).join("") + `</tbody>`;
+
+      const container = document.getElementById("device-table");
+      container.innerHTML = "";
+      container.appendChild(table);
+
+    } catch (err) {
+      console.error("Failed to load devices:", err);
+      document.getElementById("device-table").innerHTML =
+        `<p class="text-red-600">Failed to load devices. Check credentials or API response.</p>`;
+    }
+  }
+
+  function openApproveModal(mac) {
+    currentApproveMac = mac;
+    document.getElementById("approve-type").value = "unknown";
+    document.getElementById("approve-modal").classList.remove("hidden");
+  }
+
+  function closeModal() {
+    document.getElementById("approve-modal").classList.add("hidden");
+  }
+
+  async function submitApproval() {
+    const type = document.getElementById("approve-type").value;
+    if (type === "unknown") {
+      alert("You must choose a valid device type.");
+      return;
+    }
+
+    const formData = new FormData();
+    formData.append("mac", currentApproveMac);
+    formData.append("device_type", type);
+
+    try {
+      const res = await fetch("/api/approve", {
+        method: "POST",
+        body: formData
+      });
+
+      if (res.ok) {
+        closeModal();
+        await loadDevices();
+      } else {
+        const err = await res.json();
+        alert("Failed to approve device: " + err.detail);
+      }
+    } catch (err) {
+      alert("Error approving device.");
+      console.error(err);
+    }
+  }
+
+  async function denyDevice(mac) {
+    await postAction("/api/deny", mac);
+  }
+
+  async function blockDevice(mac) {
+    if (confirm("Block this device? It will be permanently rejected.")) {
+      await postAction("/api/block", mac);
+    }
+  }
+
+  async function removeDevice(mac) {
+    if (confirm("Remove this device? It will disappear from the list.")) {
+      await postAction("/api/remove", mac);
+    }
+  }
+
+  async function postAction(endpoint, mac) {
+    const formData = new FormData();
+    formData.append("mac", mac);
+
+    try {
+      const res = await fetch(endpoint, {
+        method: "POST",
+        body: formData
+      });
+
+      if (res.ok) {
+        await loadDevices();
+      } else {
+        alert(`Failed to call ${endpoint}: HTTP ${res.status}`);
+      }
+    } catch (err) {
+      console.error(`Error calling ${endpoint}:`, err);
+      alert(`Error calling ${endpoint}`);
+    }
+  }
+
+  loadDevices();
+</script>
+{% endblock %}
