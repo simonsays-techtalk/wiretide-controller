@@ -1,3 +1,6 @@
+import aiosqlite
+from fastapi import HTTPException, Request
+from wiretide.db import DB_PATH
 from fastapi import APIRouter, Request, HTTPException, Form, Depends
 from fastapi.responses import RedirectResponse, HTMLResponse
 from passlib.hash import bcrypt
@@ -6,6 +9,25 @@ import aiosqlite
 from wiretide.db import DB_PATH
 
 router = APIRouter()
+
+# --- Token verification ---
+async def require_api_token(request: Request):
+    """Validates X-API-Token or Bearer token for agent API endpoints."""
+    token = request.headers.get("X-API-Token")
+    if not token:
+        # Fallback for existing Bearer header (to support /status agent)
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[len("Bearer "):].strip()
+
+    if not token:
+        raise HTTPException(status_code=400, detail="Missing API token")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT token FROM tokens WHERE token = ?", (token,))
+        row = await cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=403, detail="Invalid API token
 
 # --- Token verification ---
 async def verify_api_token(request: Request):
