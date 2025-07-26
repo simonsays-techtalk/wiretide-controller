@@ -4,7 +4,7 @@ set -e
 WIRETIDE_DIR="/opt/wiretide"
 CERT_DIR="/etc/wiretide/certs"
 DB_FILE="$WIRETIDE_DIR/wiretide.db"
-REPO_URL="https://github.com/<your-repo>/wiretide-controller.git"
+REPO_URL="https://github.com/simonsays-techtalk/wiretide-controller.git"
 PYTHON_BIN="/usr/bin/python3"
 
 echo "[*] Installing Wiretide Controller..."
