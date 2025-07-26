@@ -33,7 +33,7 @@ pip install --upgrade pip
 pip install -r requirements.txt
 deactivate
 
-# Initialize database (creates admin user)
+# Initialize database (inside venv so bcrypt is available)
 if [ ! -f "$DB_FILE" ]; then
     echo "[*] Creating SQLite database..."
     source venv/bin/activate
@@ -41,7 +41,7 @@ if [ ! -f "$DB_FILE" ]; then
     deactivate
 fi
 
-# Generate pre-shared token for API if none exists
+# Generate API token if none exists
 API_TOKEN=$(sqlite3 "$DB_FILE" "SELECT token FROM tokens LIMIT 1;")
 if [ -z "$API_TOKEN" ]; then
     API_TOKEN=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 32)
@@ -69,7 +69,7 @@ cp nginx.conf /etc/nginx/sites-available/wiretide
 ln -sf /etc/nginx/sites-available/wiretide /etc/nginx/sites-enabled/wiretide
 systemctl restart nginx
 
-# Print credentials and token
+# Display login and token info
 IP=$(hostname -I | awk '{print $1}')
 echo "==========================================="
 echo " Wiretide Controller Installed Successfully"
