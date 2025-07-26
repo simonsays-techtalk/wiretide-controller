@@ -22,6 +22,12 @@ else
     git pull
 fi
 
+# Ensure Git doesn't complain about ownership (safe.directory)
+git config --global --add safe.directory "$WIRETIDE_DIR"
+
+# Make repo owned by www-data so service can write logs/config
+chown -R www-data:www-data "$WIRETIDE_DIR"
+
 cd "$WIRETIDE_DIR"
 
 # Create virtual environment if missing
@@ -46,7 +52,7 @@ if [ ! -f "$DB_FILE" ]; then
     deactivate
 fi
 
-# Ensure DB and folder permissions (required for SQLite locking)
+# Fix DB and folder permissions for SQLite (locks/journals)
 DB_DIR=$(dirname "$DB_FILE")
 chown -R www-data:www-data "$DB_FILE" "$DB_DIR"
 chmod -R 775 "$DB_DIR"
