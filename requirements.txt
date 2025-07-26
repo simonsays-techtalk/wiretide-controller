@@ -5,3 +5,4 @@ passlib[bcrypt]
 aiosqlite
 python-dotenv
 itsdangerous
+python-multipart
