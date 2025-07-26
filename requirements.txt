@@ -4,3 +4,4 @@ jinja2
 passlib[bcrypt]
 aiosqlite
 python-dotenv
+itsdangerous
