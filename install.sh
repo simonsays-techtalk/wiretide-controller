@@ -43,6 +43,12 @@ touch "$LOG_FILE"
 chown www-data:www-data "$LOG_FILE"
 chmod 664 "$LOG_FILE"
 
+# Fix DB and folder permissions
+mkdir -p "$(dirname "$DB_FILE")"
+touch "$DB_FILE"
+chown -R www-data:www-data "$(dirname "$DB_FILE")"
+chmod -R 775 "$(dirname "$DB_FILE")"
+
 # Initialize SQLite database (run inside venv so bcrypt is available)
 if [ ! -f "$DB_FILE" ]; then
     echo "[*] Creating SQLite database..."
