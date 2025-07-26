@@ -33,10 +33,18 @@ pip install --upgrade pip
 pip install -r requirements.txt
 deactivate
 
-# Initialize database
+# Initialize database (creates admin user)
 if [ ! -f "$DB_FILE" ]; then
     echo "[*] Creating SQLite database..."
     $PYTHON_BIN db_init.py
+fi
+
+# Generate pre-shared token for API if none exists
+API_TOKEN=$(sqlite3 "$DB_FILE" "SELECT token FROM tokens LIMIT 1;")
+if [ -z "$API_TOKEN" ]; then
+    API_TOKEN=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 32)
+    sqlite3 "$DB_FILE" "INSERT INTO tokens (token, description) VALUES ('$API_TOKEN', 'Default API Token');"
+    echo "[*] Generated new API token for /register and /status"
 fi
 
 # Generate self-signed TLS certificate (10 years)
@@ -59,5 +67,13 @@ cp nginx.conf /etc/nginx/sites-available/wiretide
 ln -sf /etc/nginx/sites-available/wiretide /etc/nginx/sites-enabled/wiretide
 systemctl restart nginx
 
-echo "[*] Installation complete!"
-echo "Access Wiretide at: https://$(hostname -I | awk '{print $1}')/"
+# Print credentials and token
+IP=$(hostname -I | awk '{print $1}')
+echo "==========================================="
+echo " Wiretide Controller Installed Successfully"
+echo "-------------------------------------------"
+echo "Access:   https://$IP/"
+echo "Username: admin"
+echo "Password: wiretide"
+echo "API Token (for agents): $API_TOKEN"
+echo "==========================================="
