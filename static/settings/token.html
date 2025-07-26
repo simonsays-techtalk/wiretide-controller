@@ -1,0 +1,26 @@
+<div id="token">
+  <h1 class="text-2xl font-semibold mb-4">Shared Token</h1>
+
+  <form method="post" action="/settings/token" class="space-y-4 max-w-md">
+    <label class="block">
+      <span class="text-gray-700 dark:text-gray-200">Current Token</span>
+      <input value="{{ token }}" type="text" readonly
+             class="mt-1 block w-full rounded border p-2 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-white" />
+    </label>
+
+    <p class="text-sm text-gray-500 dark:text-gray-300">
+      Token expires at: <code>{{ expiry }}</code>
+    </p>
+
+    <label class="block">
+      <span class="text-gray-700 dark:text-gray-200">New Expiry (in hours)</span>
+      <input type="number" name="expiry_hours" value="24" min="1"
+             class="mt-1 block w-full rounded border p-2 dark:bg-gray-800 dark:text-white" />
+    </label>
+
+    <button type="submit" name="action" value="regenerate"
+            class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700">
+      Regenerate Token
+    </button>
+  </form>
+</div>

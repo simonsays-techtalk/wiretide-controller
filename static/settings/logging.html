@@ -1,0 +1,53 @@
+{# templates/settings/logging.html #}
+<div id="logging" class="hidden">
+  <h2 class="text-2xl font-semibold mb-4">Controller Logs</h2>
+
+  <!-- Controls -->
+  <div class="flex items-center space-x-4 mb-4">
+    <label class="flex items-center space-x-2">
+      <span class="text-gray-700 dark:text-gray-200">Level:</span>
+      <select id="log-level" class="rounded border p-2 dark:bg-gray-800 dark:text-white">
+        <option value="ALL">All</option>
+        <option value="INFO">Info</option>
+        <option value="WARNING">Warning</option>
+        <option value="ERROR">Error</option>
+      </select>
+    </label>
+
+    <button onclick="loadLogs()" class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700">
+      Refresh
+    </button>
+
+    <a href="/api/logs/download" class="bg-gray-600 text-white px-4 py-2 rounded hover:bg-gray-700">
+      Download Full Log
+    </a>
+  </div>
+
+  <!-- Log Output -->
+  <div class="bg-black text-green-400 rounded p-4 overflow-auto max-h-[600px] font-mono text-sm" id="log-output">
+    Loading logs...
+  </div>
+</div>
+
+<script>
+  async function loadLogs() {
+    const level = document.getElementById("log-level").value;
+    const output = document.getElementById("log-output");
+    output.textContent = "Loading logs...";
+
+    try {
+      const res = await fetch(`/api/logs?level=${encodeURIComponent(level)}`);
+      if (!res.ok) throw new Error("Failed to fetch logs");
+
+      const data = await res.json();
+      output.textContent = data.lines.join("");
+    } catch (err) {
+      console.error("Log load error:", err);
+      output.textContent = "Failed to load logs.";
+    }
+  }
+
+  document.addEventListener("DOMContentLoaded", () => {
+    loadLogs();
+  });
+</script>
