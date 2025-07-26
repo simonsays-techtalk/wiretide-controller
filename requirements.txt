@@ -6,3 +6,4 @@ aiosqlite
 python-dotenv
 itsdangerous
 python-multipart
+
