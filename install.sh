@@ -58,6 +58,11 @@ if [ ! -f "$CERT_DIR/wiretide.crt" ]; then
       -days 3650 \
       -subj "/CN=wiretide"
 fi
+# Ensure log file exists and is writable
+mkdir -p /var/log
+touch /var/log/wiretide.log
+chown www-data:www-data /var/log/wiretide.log
+chmod 664 /var/log/wiretide.log
 
 # Install systemd service
 cp wiretide.service /etc/systemd/system/wiretide.service
