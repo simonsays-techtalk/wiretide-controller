@@ -1,0 +1,50 @@
+{# templates/settings/backup.html #}
+<div id="backup" class="hidden">
+  <h2 class="text-2xl font-semibold mb-4">Backup & Restore</h2>
+
+  <!-- Download Backup -->
+  <div class="bg-white dark:bg-gray-800 rounded shadow p-4 mb-6">
+    <h3 class="text-lg font-semibold mb-2">Download Backup</h3>
+    <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
+      This will export the Wiretide database and certificates as a tar.gz file.
+    </p>
+    <a href="/api/backup/download"
+       class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700">
+      Download Backup
+    </a>
+  </div>
+
+  <!-- Restore Backup -->
+  <div class="bg-white dark:bg-gray-800 rounded shadow p-4 mb-6">
+    <h3 class="text-lg font-semibold mb-2">Restore Backup</h3>
+    <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
+      Upload a Wiretide backup tar.gz file to restore database and certificates.
+      (Existing data will be replaced.)
+    </p>
+    <form method="post" action="/api/backup/restore" enctype="multipart/form-data" class="space-y-4">
+      <input type="file" name="file" accept=".tar.gz"
+             class="block w-full text-sm text-gray-700 dark:text-gray-200" required>
+      <button type="submit"
+              class="bg-yellow-600 text-white px-4 py-2 rounded hover:bg-yellow-700">
+        Restore Backup
+      </button>
+    </form>
+  </div>
+
+  <!-- Factory Reset -->
+  <div class="bg-white dark:bg-gray-800 rounded shadow p-4">
+    <h3 class="text-lg font-semibold mb-2 text-red-600">Factory Reset</h3>
+    <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
+      This will wipe all database data, regenerate the shared token and self-signed certificate,
+      and restore Wiretide to its initial state.
+      <strong>This cannot be undone.</strong>
+    </p>
+    <form method="post" action="/api/backup/reset"
+          onsubmit="return confirm('Are you sure you want to reset Wiretide? This cannot be undone.')">
+      <button type="submit"
+              class="bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700">
+        Factory Reset
+      </button>
+    </form>
+  </div>
+</div>
