@@ -1,13 +1,10 @@
 import sqlite3
 import os
-import hashlib
+from passlib.hash import bcrypt
 
 DB_PATH = "/opt/wiretide/wiretide.db"
 
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-
-def hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode('utf-8')).hexdigest()
 
 conn = sqlite3.connect(DB_PATH)
 cursor = conn.cursor()
@@ -33,21 +30,23 @@ CREATE TABLE IF NOT EXISTS tokens (
 );
 """)
 
-# Users table
+# Users table (with role)
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL
+    password_hash TEXT NOT NULL,
+    role TEXT DEFAULT 'admin'
 );
 """)
 
-# Default admin user
+# Default admin user (bcrypt hashed password)
 cursor.execute("SELECT COUNT(*) FROM users WHERE username='admin'")
 if cursor.fetchone()[0] == 0:
+    password_hash = bcrypt.hash("wiretide")
     cursor.execute(
-        "INSERT INTO users (username, password_hash) VALUES (?, ?)",
-        ('admin', hash_password('wiretide'))
+        "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
+        ('admin', password_hash, 'admin')
     )
     print("Default admin user created: username=admin, password=wiretide")
 
