@@ -7,20 +7,21 @@ import os
 
 app = FastAPI()
 
+# Directories
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 
-# Initialize logging
+# Initialize logging (rotating file handler)
 import wiretide.logging  # Sets up /var/log/wiretide.log
 
-# Mount static files FIRST so they're not overridden
+# Mount static first so it's always served (logo, agent files, etc.)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 print(f"Mounting static files from: {STATIC_DIR}")
 
 # Load environment variables
 load_dotenv()
 
-# Middleware
+# Middleware for login redirection
 class RedirectUnauthorizedMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         response = await call_next(request)
@@ -39,7 +40,7 @@ app.add_middleware(
     https_only=True
 )
 
-# Routers (after static mount)
+# Import routers (after static)
 from wiretide.api import devices, auth, system, backup, logs, settings, clients, ui
 app.include_router(auth.router)
 app.include_router(ui.router)
@@ -50,8 +51,7 @@ app.include_router(backup.router)
 app.include_router(logs.router)
 app.include_router(clients.router)
 
-
-# Debug route (for testing)
+# Debug endpoint (optional, can be removed later)
 @app.get("/debug/files")
 async def debug_files():
     import os
