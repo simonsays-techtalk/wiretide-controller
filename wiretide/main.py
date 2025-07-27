@@ -4,7 +4,9 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 import os
+from wiretide.api import system
 
+app.include_router(system.router, prefix="/api")
 app = FastAPI()
 
 # Directories

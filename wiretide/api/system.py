@@ -2,7 +2,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse, FileResponse, RedirectResponse
 import os, re, subprocess, socket, hashlib
 from wiretide.api.auth import require_login
-
+import subprocess
+import threading
+import time
 
 LOG_FILE = "/var/log/wiretide.log"
 CERT_DIR = "wiretide/certs"
@@ -127,3 +129,14 @@ async def regenerate_cert(_: str = Depends(require_login)):
     except subprocess.CalledProcessError as e:
         print("Cert generation failed:", e)
         raise HTTPException(status_code=500, detail="Certificate generation failed.")
+
+
+def delayed_restart():
+    time.sleep(1)  # give API time to respond before restart
+    subprocess.run(["sudo", "systemctl", "restart", "wiretide.service"], check=False)
+
+@router.post("/restart")
+def restart_service():
+    threading.Thread(target=delayed_restart, daemon=True).start()
+    return {"status": "restarting"}
+
