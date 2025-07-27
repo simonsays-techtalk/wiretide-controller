@@ -4,6 +4,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 import os
+from wiretide.api import roles
 
 app = FastAPI()  # <-- Define app FIRST
 
@@ -50,6 +51,7 @@ app.include_router(system.router, prefix="/api")  # <-- Apply prefix here
 app.include_router(backup.router)
 app.include_router(logs.router)
 app.include_router(clients.router)
+app.include_router(roles.router)
 
 # Debug endpoint (optional, can be removed later)
 @app.get("/debug/files")

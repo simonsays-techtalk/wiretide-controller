@@ -1,6 +1,6 @@
 {# templates/settings/users.html #}
 <div id="users" class="hidden">
-  <h2 class="text-2xl font-semibold mb-4">Users</h2>
+  <h2 class="text-2xl font-semibold mb-4">Users & Roles</h2>
 
   <!-- Add User Form -->
   <form method="post" action="/api/users" class="space-y-4 max-w-md mb-8">
@@ -31,7 +31,7 @@
   </form>
 
   <!-- User List -->
-  <table class="min-w-full text-sm table-auto border">
+  <table class="min-w-full text-sm table-auto border mb-8">
     <thead>
       <tr class="bg-gray-100 dark:bg-gray-700 text-left">
         <th class="p-2 border">Username</th>
@@ -40,9 +40,15 @@
       </tr>
     </thead>
     <tbody id="user-list">
-      <!-- Filled by JS -->
+      <!-- Populated by JS -->
     </tbody>
   </table>
+
+  <!-- Roles & Permissions -->
+  <div id="roles-container" class="space-y-6">
+    <h3 class="text-xl font-semibold mb-3">Role Permissions</h3>
+    <!-- Populated dynamically -->
+  </div>
 </div>
 
 <script>
@@ -65,5 +71,77 @@
       tbody.appendChild(row);
     });
   }
-  document.addEventListener("DOMContentLoaded", loadUsers);
+
+  async function loadRoles() {
+    const [rolesRes, permsRes] = await Promise.all([
+      fetch("/api/roles"),
+      fetch("/api/roles/permissions")
+    ]);
+    if (!rolesRes.ok || !permsRes.ok) {
+      document.getElementById("roles-container").innerText = "Failed to load roles or permissions.";
+      return;
+    }
+    const { roles } = await rolesRes.json();
+    const { permissions } = await permsRes.json();
+
+    const container = document.getElementById("roles-container");
+    container.innerHTML = "<h3 class='text-xl font-semibold mb-3'>Role Permissions</h3>";
+
+    roles.forEach(role => {
+      const wrapper = document.createElement("div");
+      wrapper.className = "p-4 border border-gray-700 bg-gray-900 rounded";
+
+      const title = document.createElement("h4");
+      title.className = "font-semibold mb-2 text-lg";
+      title.innerText = `Role: ${role.name}`;
+      wrapper.appendChild(title);
+
+      const form = document.createElement("form");
+      form.method = "POST";
+      form.action = `/api/roles/${role.id}/permissions`;
+
+      permissions.forEach(perm => {
+        const label = document.createElement("label");
+        label.className = "block text-sm text-gray-300";
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.value = perm;
+        checkbox.className = "mr-2";
+        if (role.permissions.includes(perm) || role.permissions.includes("*")) {
+          checkbox.checked = true;
+        }
+        label.appendChild(checkbox);
+        label.append(` ${perm}`);
+        form.appendChild(label);
+      });
+
+      const hiddenInput = document.createElement("input");
+      hiddenInput.type = "hidden";
+      hiddenInput.name = "permissions";
+      form.appendChild(hiddenInput);
+
+      const btn = document.createElement("button");
+      btn.type = "submit";
+      btn.innerText = "Save Permissions";
+      btn.className = "mt-3 px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-500";
+      form.appendChild(btn);
+
+      form.addEventListener("submit", e => {
+        e.preventDefault();
+        const checked = Array.from(form.querySelectorAll("input[type=checkbox]:checked"))
+            .map(cb => cb.value);
+        hiddenInput.value = checked.join(",");
+        form.submit();
+      });
+
+      wrapper.appendChild(form);
+      container.appendChild(wrapper);
+    });
+  }
+
+  document.addEventListener("DOMContentLoaded", () => {
+    loadUsers();
+    loadRoles();
+  });
 </script>
+

@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS role_permissions (
 );
 """)
 
+
 # --- Seed roles if missing ---
 cursor.execute("SELECT COUNT(*) FROM roles")
 role_count = cursor.fetchone()[0]
@@ -122,6 +123,13 @@ if cursor.fetchone()[0] > 0:
     SET role_id = (SELECT id FROM roles WHERE name = users.role)
     WHERE role_id IS NULL
     """)
+    
+# Ensure admin has roles:manage explicitly (even though '*' exists)
+cursor.execute("""
+INSERT OR IGNORE INTO role_permissions (role_id, permission)
+SELECT id, 'roles:manage' FROM roles WHERE name='admin'
+""")
+
 
 # --- Seed default admin user if none ---
 cursor.execute("SELECT COUNT(*) FROM users WHERE username='admin'")
