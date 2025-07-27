@@ -6,7 +6,7 @@ CERT_DIR="/etc/wiretide/certs"
 STATIC_DIR="$WIRETIDE_DIR/wiretide/static"
 DB_FILE="$WIRETIDE_DIR/wiretide.db"
 LOG_FILE="/var/log/wiretide.log"
-REPO_URL="https://github.com/<your-repo>/wiretide-controller.git"
+REPO_URL="https://github.com/simonsays-techtalk/wiretide-controller.git"
 PYTHON_BIN="/usr/bin/python3"
 
 echo "[*] Installing Wiretide Controller..."
