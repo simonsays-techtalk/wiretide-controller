@@ -3,7 +3,7 @@ from fastapi import APIRouter, UploadFile, Depends, HTTPException
 from fastapi.responses import FileResponse, RedirectResponse
 import os, tarfile, tempfile, subprocess
 
-from wiretide.api.auth import require_login
+from wiretide.api.auth import rbac_required
 from wiretide.db import DB_PATH
 from wiretide.tokens import ensure_valid_shared_token
 
@@ -11,8 +11,8 @@ CERTS_DIR = "wiretide/certs"
 
 router = APIRouter()
 
-@router.get("/api/backup/download")
-async def download_backup(_: str = Depends(require_login)):
+@router.get("/api/backup/download", dependencies=[rbac_required("backup:download")])
+async def download_backup():
     """Create a tar.gz backup containing the DB and certs, return as download."""
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".tar.gz") as tmp:
@@ -27,8 +27,8 @@ async def download_backup(_: str = Depends(require_login)):
         raise HTTPException(status_code=500, detail="Failed to create backup")
 
 
-@router.post("/api/backup/restore")
-async def restore_backup(file: UploadFile, _: str = Depends(require_login)):
+@router.post("/api/backup/restore", dependencies=[rbac_required("backup:restore")])
+async def restore_backup(file: UploadFile):
     """Restore the DB and certs from a provided tar.gz backup."""
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".tar.gz") as tmp:
@@ -49,8 +49,8 @@ async def restore_backup(file: UploadFile, _: str = Depends(require_login)):
         raise HTTPException(status_code=500, detail="Failed to restore backup")
 
 
-@router.post("/api/backup/reset")
-async def factory_reset(_: str = Depends(require_login)):
+@router.post("/api/backup/reset", dependencies=[rbac_required("system:reset")])
+async def factory_reset():
     """Perform a factory reset by wiping the DB and regenerating token and certs."""
     try:
         # Remove DB
@@ -74,3 +74,4 @@ async def factory_reset(_: str = Depends(require_login)):
     except Exception as e:
         print("Factory reset failed:", e)
         raise HTTPException(status_code=500, detail="Failed to reset Wiretide")
+

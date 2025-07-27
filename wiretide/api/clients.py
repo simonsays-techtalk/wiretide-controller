@@ -2,7 +2,7 @@ import aiosqlite
 import json
 import ipaddress
 from fastapi import APIRouter, Depends
-from wiretide.api.auth import require_login
+from wiretide.api.auth import rbac_required
 from wiretide.db import DB_PATH
 
 router = APIRouter(prefix="/api")
@@ -83,6 +83,8 @@ async def get_clients_list():
     )
     return sorted_clients
 
-@router.get("/clients", dependencies=[Depends(require_login)])
+@router.get("/clients", dependencies=[rbac_required("devices:view")])
 async def list_clients():
+    """Return the current list of connected clients (read-only)."""
     return await get_clients_list()
+

@@ -3,14 +3,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 import os, re
 
-from wiretide.api.auth import require_login
+from wiretide.api.auth import rbac_required
 
 LOG_FILE = "/var/log/wiretide.log"
 
 router = APIRouter()
 
-@router.get("/api/logs")
-async def get_logs(level: str = "ALL", _: str = Depends(require_login)):
+@router.get("/api/logs", dependencies=[rbac_required("logs:view")])
+async def get_logs(level: str = "ALL"):
     """Return the last 200 log lines, optionally filtered by level."""
     level = level.upper()
     valid_levels = {"ALL", "INFO", "WARNING", "ERROR"}
@@ -33,10 +33,11 @@ async def get_logs(level: str = "ALL", _: str = Depends(require_login)):
     return {"lines": lines}
 
 
-@router.get("/api/logs/download")
-async def download_logs(_: str = Depends(require_login)):
+@router.get("/api/logs/download", dependencies=[rbac_required("logs:download")])
+async def download_logs():
     """Download the raw Wiretide log file."""
     try:
         return FileResponse(LOG_FILE, filename="wiretide.log")
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Log file not found")
+
