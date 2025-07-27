@@ -8,7 +8,7 @@ os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 conn = sqlite3.connect(DB_PATH)
 cursor = conn.cursor()
 
-# Devices table
+# --- Devices table ---
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS devices (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS devices (
 );
 """)
 
-# Device status table (summary data)
+# --- Device status table ---
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS device_status (
     mac TEXT PRIMARY KEY,
@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS device_status (
 );
 """)
 
-# Device configs (queued config)
+# --- Device configs table ---
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS device_configs (
     mac TEXT PRIMARY KEY,
@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS device_configs (
 );
 """)
 
-# Tokens table (for agents)
+# --- Tokens table ---
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS tokens (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS tokens (
 );
 """)
 
-# Config table (legacy shared token support)
+# --- Config table ---
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS config (
     key TEXT PRIMARY KEY,
@@ -64,23 +64,75 @@ CREATE TABLE IF NOT EXISTS config (
 );
 """)
 
-# Users table
+# --- Users table ---
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
-    role TEXT DEFAULT 'admin'
+    role TEXT DEFAULT 'admin',
+    role_id INTEGER
 );
 """)
 
-# Seed default admin
+# --- Roles & Permissions tables (RBAC) ---
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS roles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE
+);
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS role_permissions (
+    role_id INTEGER,
+    permission TEXT NOT NULL,
+    FOREIGN KEY(role_id) REFERENCES roles(id),
+    UNIQUE(role_id, permission)
+);
+""")
+
+# --- Seed roles if missing ---
+cursor.execute("SELECT COUNT(*) FROM roles")
+role_count = cursor.fetchone()[0]
+if role_count == 0:
+    cursor.execute("INSERT INTO roles (name) VALUES ('admin')")
+    cursor.execute("INSERT INTO roles (name) VALUES ('user')")
+
+# --- Seed default permissions ---
+# Admin: full access
+cursor.execute("""
+INSERT OR IGNORE INTO role_permissions (role_id, permission)
+SELECT id, '*' FROM roles WHERE name='admin'
+""")
+
+# User: read-only (view only)
+for perm in ['devices:view', 'status:view']:
+    cursor.execute("""
+    INSERT OR IGNORE INTO role_permissions (role_id, permission)
+    SELECT id, ? FROM roles WHERE name='user'
+    """, (perm,))
+
+# --- Link users to roles ---
+# If role_id missing, assign based on role name
+cursor.execute("SELECT COUNT(*) FROM users")
+if cursor.fetchone()[0] > 0:
+    cursor.execute("""
+    UPDATE users
+    SET role_id = (SELECT id FROM roles WHERE name = users.role)
+    WHERE role_id IS NULL
+    """)
+
+# --- Seed default admin user if none ---
 cursor.execute("SELECT COUNT(*) FROM users WHERE username='admin'")
 if cursor.fetchone()[0] == 0:
     password_hash = bcrypt.hash("wiretide")
+    # Get admin role_id
+    cursor.execute("SELECT id FROM roles WHERE name='admin'")
+    admin_role_id = cursor.fetchone()[0]
     cursor.execute(
-        "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
-        ('admin', password_hash, 'admin')
+        "INSERT INTO users (username, password_hash, role, role_id) VALUES (?, ?, ?, ?)",
+        ('admin', password_hash, 'admin', admin_role_id)
     )
     print("Default admin user created: username=admin, password=wiretide")
 
