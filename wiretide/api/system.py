@@ -1,18 +1,17 @@
+# wiretide/api/system.py
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse, FileResponse, RedirectResponse
-import os, re, subprocess, socket, hashlib
-from wiretide.api.auth import require_login
-import subprocess
-import threading
-import time
+import os, re, subprocess, socket, hashlib, threading, time
+
+from wiretide.api.auth import rbac_required
 
 LOG_FILE = "/var/log/wiretide.log"
 CERT_DIR = "wiretide/certs"
 
 router = APIRouter()
 
-@router.get("/api/logs")
-async def get_logs(level: str = "ALL", _: str = Depends(require_login)):
+@router.get("/api/logs", dependencies=[rbac_required("logs:view")])
+async def get_logs(level: str = "ALL"):
     """Return the last 200 log lines, optionally filtered by level."""
     level = level.upper()
     valid_levels = {"ALL", "INFO", "WARNING", "ERROR"}
@@ -32,8 +31,8 @@ async def get_logs(level: str = "ALL", _: str = Depends(require_login)):
     return {"lines": lines}
 
 
-@router.get("/api/logs/download")
-async def download_logs(_: str = Depends(require_login)):
+@router.get("/api/logs/download", dependencies=[rbac_required("logs:download")])
+async def download_logs():
     """Download the raw log file."""
     try:
         return FileResponse(LOG_FILE, filename="wiretide.log")
@@ -41,8 +40,8 @@ async def download_logs(_: str = Depends(require_login)):
         raise HTTPException(status_code=404, detail="Log file not found")
 
 
-@router.get("/api/system-info")
-async def system_info(_: str = Depends(require_login)):
+@router.get("/api/system-info", dependencies=[rbac_required("system:view")])
+async def system_info():
     """Basic controller info (hostname, uptime, version, certs, agent checksum)."""
     hostname = socket.gethostname()
     try:
@@ -59,7 +58,7 @@ async def system_info(_: str = Depends(require_login)):
         uptime = "unknown"
 
     # Version info
-    version = "Wiretide v0.1.0"
+    version = "Wiretide v0.5.0"
 
     # Certificate details
     cert_path = os.path.join(CERT_DIR, "wiretide-ca.crt")
@@ -98,8 +97,8 @@ async def system_info(_: str = Depends(require_login)):
     })
 
 
-@router.post("/api/restart")
-async def restart_controller(_: str = Depends(require_login)):
+@router.post("/api/restart", dependencies=[rbac_required("system:restart")])
+async def restart_controller():
     """Restart the Wiretide systemd service."""
     try:
         subprocess.Popen(["systemctl", "restart", "wiretide.service"])
@@ -109,8 +108,8 @@ async def restart_controller(_: str = Depends(require_login)):
     return RedirectResponse("/settings", status_code=303)
 
 
-@router.post("/api/cert/regenerate")
-async def regenerate_cert(_: str = Depends(require_login)):
+@router.post("/api/cert/regenerate", dependencies=[rbac_required("cert:regenerate")])
+async def regenerate_cert():
     """Regenerate the CA certificate."""
     cert_path = os.path.join(CERT_DIR, "wiretide-ca.crt")
     key_path = os.path.join(CERT_DIR, "wiretide-ca.key")
@@ -135,8 +134,9 @@ def delayed_restart():
     time.sleep(1)  # give API time to respond before restart
     subprocess.run(["sudo", "systemctl", "restart", "wiretide.service"], check=False)
 
-@router.post("/restart")
+@router.post("/restart", dependencies=[rbac_required("system:restart")])
 def restart_service():
+    """Trigger a delayed service restart (non-API endpoint)."""
     threading.Thread(target=delayed_restart, daemon=True).start()
     return {"status": "restarting"}
 
