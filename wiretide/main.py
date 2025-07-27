@@ -1,4 +1,3 @@
-# wiretide/main.py
 from fastapi import FastAPI
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -6,22 +5,22 @@ from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 import os
 
-# Initialize logging (rotating file handler)
+app = FastAPI()
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+STATIC_DIR = os.path.join(BASE_DIR, "static")
+
+# Initialize logging
 import wiretide.logging  # Sets up /var/log/wiretide.log
 
-# Import all routers
-from wiretide.api import (
-    devices,
-    auth,
-    system,
-    backup,
-    logs,
-    settings,
-    clients,
-    ui
-)
+# Mount static files FIRST so they're not overridden
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+print(f"Mounting static files from: {STATIC_DIR}")
 
-# Middleware to redirect unauthorized users to /login
+# Load environment variables
+load_dotenv()
+
+# Middleware
 class RedirectUnauthorizedMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         response = await call_next(request)
@@ -30,13 +29,6 @@ class RedirectUnauthorizedMiddleware(BaseHTTPMiddleware):
             return RedirectResponse(url="/login")
         return response
 
-# Load environment variables
-load_dotenv()
-
-# Create FastAPI app
-app = FastAPI()
-
-# Add middleware
 app.add_middleware(RedirectUnauthorizedMiddleware)
 app.add_middleware(
     SessionMiddleware,
@@ -47,7 +39,8 @@ app.add_middleware(
     https_only=True
 )
 
-# Register routers
+# Routers (after static mount)
+from wiretide.api import devices, auth, system, backup, logs, settings, clients, ui
 app.include_router(auth.router)
 app.include_router(ui.router)
 app.include_router(devices.router)
@@ -57,5 +50,12 @@ app.include_router(backup.router)
 app.include_router(logs.router)
 app.include_router(clients.router)
 
-# Static file serving
+# Optional: Mount agent files LAST so it doesn't override static
 app.mount("/", StaticFiles(directory="/var/www/html", html=True), name="agent_files")
+
+# Debug route (for testing)
+@app.get("/debug/files")
+async def debug_files():
+    import os
+    return {"dir": STATIC_DIR, "files": os.listdir(STATIC_DIR)}
+
