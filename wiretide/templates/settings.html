@@ -25,32 +25,4 @@
 </div>
 {% endblock %}
 
-{% block scripts %}
-<script>
-  document.addEventListener("DOMContentLoaded", () => {
-    const links = document.querySelectorAll(".tab-link");
-    const tabs = document.querySelectorAll("section > div");
 
-    links.forEach(link => {
-      link.addEventListener("click", e => {
-        e.preventDefault();
-        const id = link.getAttribute("href").substring(1);
-
-        // Hide all tab panels
-        tabs.forEach(tab => tab.classList.add("hidden"));
-        document.getElementById(id).classList.remove("hidden");
-
-        // Reset tab styles
-        links.forEach(a => {
-          a.classList.remove("font-medium", "text-gray-800", "dark:text-gray-200");
-          a.classList.add("text-gray-600", "dark:text-gray-400");
-        });
-
-        // Activate clicked tab
-        link.classList.remove("text-gray-600", "dark:text-gray-400");
-        link.classList.add("font-medium", "text-gray-800", "dark:text-gray-200");
-      });
-    });
-  });
-</script>
-{% endblock %}

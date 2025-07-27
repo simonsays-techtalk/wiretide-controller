@@ -57,26 +57,59 @@
 
   <!-- Scripts -->
   {% block scripts %}
-  <script>
-    function toggleTheme() {
-      const html = document.documentElement;
-      const isDark = html.classList.contains("dark");
-      html.classList.toggle("dark");
-      localStorage.theme = isDark ? "light" : "dark";
-    }
+<script>
+  // --- Theme Toggle ---
+  function toggleTheme() {
+    const html = document.documentElement;
+    const isDark = html.classList.contains("dark");
+    html.classList.toggle("dark");
+    localStorage.theme = isDark ? "light" : "dark";
+  }
 
-    document.getElementById("user-menu-btn").addEventListener("click", () => {
-      document.getElementById("user-dropdown").classList.toggle("hidden");
+  // --- User Menu Dropdown ---
+  const userMenuBtn = document.getElementById("user-menu-btn");
+  const userDropdown = document.getElementById("user-dropdown");
+  if (userMenuBtn) {
+    userMenuBtn.addEventListener("click", () => {
+      userDropdown.classList.toggle("hidden");
     });
 
     document.addEventListener("click", (e) => {
-      const btn = document.getElementById("user-menu-btn");
-      const dropdown = document.getElementById("user-dropdown");
-      if (!btn.contains(e.target) && !dropdown.contains(e.target)) {
-        dropdown.classList.add("hidden");
+      if (!userMenuBtn.contains(e.target) && !userDropdown.contains(e.target)) {
+        userDropdown.classList.add("hidden");
       }
     });
-  </script>
-  {% endblock %}
+  }
+
+  // --- Tab Switching (for Settings) ---
+  document.addEventListener("DOMContentLoaded", () => {
+    const links = document.querySelectorAll(".tab-link");
+    const tabs = document.querySelectorAll("section > div");
+
+    if (links.length && tabs.length) {
+      links.forEach(link => {
+        link.addEventListener("click", e => {
+          e.preventDefault();
+          const id = link.getAttribute("href").substring(1);
+
+          // Hide all tab panels
+          tabs.forEach(tab => tab.classList.add("hidden"));
+          document.getElementById(id).classList.remove("hidden");
+
+          // Reset tab styles
+          links.forEach(a => {
+            a.classList.remove("font-medium", "text-gray-800", "dark:text-gray-200");
+            a.classList.add("text-gray-600", "dark:text-gray-400");
+          });
+
+          // Activate clicked tab
+          link.classList.remove("text-gray-600", "dark:text-gray-400");
+          link.classList.add("font-medium", "text-gray-800", "dark:text-gray-200");
+        });
+      });
+    }
+  });
+</script>
+{% endblock %}
 </body>
 </html>
