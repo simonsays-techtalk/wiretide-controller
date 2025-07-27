@@ -4,7 +4,7 @@ set -e
 echo ">>> Wiretide Agent Installer"
 
 # Prompt for controller URL
-printf "Enter Wiretide controller URL (e.g. https://wiretide.autohome.local): "
+printf "Enter Wiretide controller URL (e.g. https://wiretide.local): "
 read CONTROLLER_URL
 
 # Strip protocol to get hostname (used for CA fetch)
