@@ -41,7 +41,7 @@ async def restore_backup(file: UploadFile, _: str = Depends(require_login)):
                 # Only allow DB and certs
                 if m.name not in ["wiretide.db"] and not m.name.startswith("certs"):
                     continue
-                target_dir = "wiretide/db" if m.name.endswith(".db") else "wiretide"
+                target_dir = os.path.dirname(DB_PATH) if m.name.endswith(".db") else "wiretide"
                 tar.extract(m, path=target_dir)
         return RedirectResponse("/settings", status_code=303)
     except Exception as e:
