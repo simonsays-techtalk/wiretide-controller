@@ -42,7 +42,7 @@ Notes
     The included self-signed TLS certificate will trigger browser warnings.
     For testing, curl commands can use -k to skip certificate checks:
 
-curl -k https://<server-ip>/api/status
+curl -k https://server.ip/api/status
 
 All assets (logo, agent download files) are served from /static/.
 Place any custom branding or agent packages in:
