@@ -1,4 +1,4 @@
-# Wiretide Controller
+# Wiretide Controller.
 
 **Wiretide** is a lightweight controller for managing **OpenWRT devices** via a central server.  
 It provides a simple web interface, API, and agent integration for device registration, monitoring, and management.
