@@ -94,16 +94,16 @@ async def device_status(status: DeviceStatus, request: Request, _: str = Depends
         await db.commit()
 
 @router.get("/config")
-async def get_config(request: Request):
-    auth = request.headers.get("Authorization", "")
+async def get_config(request: Request, _: str = Depends(require_api_token)):
+    """Return queued config for an approved device."""
     mac = request.headers.get("X-MAC", "").lower()
 
-    if not auth.startswith("Bearer ") or not mac:
-        raise HTTPException(401)
+    if not mac:
+        raise HTTPException(status_code=401)
 
-    token = auth.removeprefix("Bearer ").strip()
     async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("SELECT approved FROM devices WHERE mac = ? AND token = ?", (mac, token))
+        # Ensure the device exists and is approved
+        cursor = await db.execute("SELECT approved FROM devices WHERE mac = ?", (mac,))
         row = await cursor.fetchone()
         if not row or not row[0]:
             raise HTTPException(status_code=403, detail="Unauthorized or unapproved")
