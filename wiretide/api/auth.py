@@ -1,25 +1,18 @@
 import aiosqlite
-from fastapi import HTTPException, Request
-from wiretide.db import DB_PATH
-from fastapi import APIRouter, Request, HTTPException, Form, Depends
+from fastapi import HTTPException, Request, Form, APIRouter, Depends
 from fastapi.responses import RedirectResponse, HTMLResponse
 from passlib.hash import bcrypt
-import aiosqlite
-
 from wiretide.db import DB_PATH
 
 router = APIRouter()
 
 # --- Token verification ---
 async def require_api_token(request: Request):
-    """Validate token for device API endpoints (/register, /status)."""
     token = request.headers.get("X-API-Token")
     if not token:
-        # Backward compatibility with Authorization: Bearer <token>
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
             token = auth_header[len("Bearer "):].strip()
-
     if not token:
         raise HTTPException(status_code=400, detail="Missing API token")
 
@@ -28,14 +21,12 @@ async def require_api_token(request: Request):
         row = await cursor.fetchone()
         if not row:
             raise HTTPException(status_code=403, detail="Invalid API token")
-            
-# --- Token verification ---
+
+
 async def verify_api_token(request: Request):
-    """Verify API token from X-API-Token header for device endpoints."""
     token = request.headers.get("X-API-Token")
     if not token:
         raise HTTPException(status_code=400, detail="Missing API token")
-
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("SELECT token FROM tokens WHERE token = ?", (token,))
         row = await cursor.fetchone()
@@ -43,15 +34,24 @@ async def verify_api_token(request: Request):
             raise HTTPException(status_code=403, detail="Invalid API token")
 
 
-
-# --- Helper for other modules ---
+# --- Session & Role Helpers ---
 def require_login(request: Request):
     if "user" not in request.session:
         raise HTTPException(status_code=401, detail="Login required")
 
 
-# --- Authentication & Session Routes ---
+async def require_admin(request: Request):
+    username = request.session.get("user")
+    if not username:
+        raise HTTPException(status_code=401, detail="Login required")
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT role FROM users WHERE username = ?", (username,))
+        row = await cursor.fetchone()
+        if not row or row[0] != "admin":
+            raise HTTPException(status_code=403, detail="Admin privileges required")
 
+
+# --- Authentication Routes ---
 @router.get("/login", response_class=HTMLResponse)
 async def login_form(request: Request):
     from fastapi.templating import Jinja2Templates
@@ -61,8 +61,7 @@ async def login_form(request: Request):
 
 @router.post("/login")
 async def login(request: Request, username: str = Form(...), password: str = Form(...)):
-    # NOTE: We aren't verifying passwords yet (need DB hashes)
-    # For now, just set session.
+    # NOTE: Password validation should be here (hashed), currently just logs in.
     request.session["user"] = username
     return RedirectResponse("/index.html", status_code=302)
 
@@ -79,7 +78,6 @@ async def change_password_form(request: Request):
     if "user" not in request.session:
         raise HTTPException(status_code=401)
     username = request.session.get("user")
-
     from fastapi.templating import Jinja2Templates
     templates = Jinja2Templates(directory="wiretide/templates")
     return templates.TemplateResponse("change_password.html", {
@@ -89,12 +87,7 @@ async def change_password_form(request: Request):
 
 
 @router.post("/change-password")
-async def change_password(
-    request: Request,
-    old_password: str = Form(...),
-    new_password: str = Form(...),
-    confirm_password: str = Form(...)
-):
+async def change_password(request: Request, old_password: str = Form(...), new_password: str = Form(...), confirm_password: str = Form(...)):
     username = request.session.get("user")
     if not username:
         raise HTTPException(status_code=401)
@@ -128,7 +121,6 @@ async def change_password(
 
 
 # --- User Management API ---
-
 @router.get("/api/users")
 async def list_users(_: str = Depends(require_login)):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -138,31 +130,23 @@ async def list_users(_: str = Depends(require_login)):
 
 
 @router.post("/api/users")
-async def create_user(
-    username: str = Form(...),
-    password: str = Form(...),
-    role: str = Form(...),
-    _: str = Depends(require_login)
-):
+async def create_user(username: str = Form(...), password: str = Form(...), role: str = Form(...), request: Request = None):
+    await require_admin(request)  # Only admins can create users
     if role not in ["admin", "user"]:
         raise HTTPException(400, detail="Invalid role")
 
     password_hash = bcrypt.hash(password)
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
-            (username, password_hash, role)
-        )
+        await db.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)", (username, password_hash, role))
         await db.commit()
     return RedirectResponse("/settings", status_code=303)
 
 
 @router.post("/api/users/delete")
-async def delete_user(
-    username: str = Form(...),
-    request: Request = None,
-    _: str = Depends(require_login)
-):
+async def delete_user(username: str = Form(...), request: Request = None):
+    await require_admin(request)  # Only admins can delete users
+    if username == "admin":
+        raise HTTPException(403, detail="Default admin cannot be deleted")
     if username == request.session.get("user"):
         raise HTTPException(400, detail="You cannot delete your own account.")
 
