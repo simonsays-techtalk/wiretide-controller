@@ -4,10 +4,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 import os
-from wiretide.api import system
 
-app.include_router(system.router, prefix="/api")
-app = FastAPI()
+app = FastAPI()  # <-- Define app FIRST
 
 # Directories
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -48,7 +46,7 @@ app.include_router(auth.router)
 app.include_router(ui.router)
 app.include_router(devices.router)
 app.include_router(settings.router)
-app.include_router(system.router)
+app.include_router(system.router, prefix="/api")  # <-- Apply prefix here
 app.include_router(backup.router)
 app.include_router(logs.router)
 app.include_router(clients.router)
