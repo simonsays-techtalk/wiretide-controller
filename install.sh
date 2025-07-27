@@ -107,6 +107,14 @@ cp nginx.conf /etc/nginx/sites-available/wiretide
 ln -sf /etc/nginx/sites-available/wiretide /etc/nginx/sites-enabled/wiretide
 systemctl restart nginx
 
+# Allow www-data to restart wiretide.service without password
+echo "Configuring sudo permissions for www-data to manage wiretide.service..."
+sudo bash -c 'cat >/etc/sudoers.d/wiretide' <<'EOF'
+www-data ALL=(ALL) NOPASSWD: /bin/systemctl restart wiretide.service
+EOF
+sudo chmod 440 /etc/sudoers.d/wiretide
+
+
 # Health check
 echo "[*] Checking if Wiretide service is running..."
 sleep 3
