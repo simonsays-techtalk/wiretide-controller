@@ -1,0 +1,10 @@
+#!/bin/sh /etc/rc.common
+START=99
+
+start() {
+  /etc/wiretide-agent-run &
+}
+
+stop() {
+  kill $(pgrep -f wiretide-agent-run) 2>/dev/null
+}

@@ -50,8 +50,6 @@ app.include_router(backup.router)
 app.include_router(logs.router)
 app.include_router(clients.router)
 
-# Optional: Mount agent files LAST so it doesn't override static
-app.mount("/", StaticFiles(directory="/var/www/html", html=True), name="agent_files")
 
 # Debug route (for testing)
 @app.get("/debug/files")
