@@ -203,7 +203,7 @@ stop() { kill "$(pgrep -f wiretide-agent-run)" 2>/dev/null; }
 EOF
 chmod +x "$AGENT_DIR/wiretide-init"
 
-### --- NGINX CONFIG ---
+### --- NGINX CONFIG (serves agent dir over HTTP) ---
 cat > /etc/nginx/sites-available/wiretide <<'EOF'
 server {
     listen 443 ssl;
@@ -229,9 +229,10 @@ server {
     listen 80;
     server_name _;
 
-    # Serve agent installer over HTTP (bootstrap)
-    location /static/agent/install.sh {
-        alias /opt/wiretide/wiretide/static/agent/install.sh;
+    # Serve entire agent directory over HTTP (bootstrap)
+    location /static/agent/ {
+        alias /opt/wiretide/wiretide/static/agent/;
+        autoindex on;
     }
 
     # Redirect all other HTTP traffic to HTTPS
@@ -270,5 +271,6 @@ echo "Password: wiretide"
 echo "API Token (for agents): $API_TOKEN"
 echo "CA Download: https://$IP/ca.crt"
 echo "Agent Installer (HTTP bootstrap): http://$IP/static/agent/install.sh"
+echo "Full Agent Directory (HTTP): http://$IP/static/agent/"
 echo "==========================================="
 
