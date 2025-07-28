@@ -88,6 +88,11 @@ openssl req -new -key "$CERT_DIR/wiretide.key" -subj "/CN=wiretide" -out "$CERT_
 openssl x509 -req -in "$CERT_DIR/wiretide.csr" -CA "$CERT_DIR/wiretide-ca.crt" -CAkey "$CERT_DIR/wiretide-ca.key" \
   -CAcreateserial -out "$CERT_DIR/wiretide.crt" -days 825 -sha256
 
+# Fix cert permissions for Nginx
+chown root:www-data "$CERT_DIR/wiretide.key" "$CERT_DIR/wiretide.crt"
+chmod 640 "$CERT_DIR/wiretide.key"
+chmod 644 "$CERT_DIR/wiretide.crt"
+
 cp "$CERT_DIR/wiretide-ca.crt" "$STATIC_DIR/ca.crt"
 chown www-data:www-data "$STATIC_DIR/ca.crt"
 
@@ -203,7 +208,7 @@ stop() { kill "$(pgrep -f wiretide-agent-run)" 2>/dev/null; }
 EOF
 chmod +x "$AGENT_DIR/wiretide-init"
 
-### --- NGINX CONFIG (serves agent dir over HTTP) ---
+### --- NGINX CONFIG (serves full agent dir) ---
 cat > /etc/nginx/sites-available/wiretide <<'EOF'
 server {
     listen 443 ssl;
@@ -229,7 +234,7 @@ server {
     listen 80;
     server_name _;
 
-    # Serve entire agent directory over HTTP (bootstrap)
+    # Serve full agent directory over HTTP (bootstrap)
     location /static/agent/ {
         alias /opt/wiretide/wiretide/static/agent/;
         autoindex on;
@@ -242,6 +247,13 @@ server {
 }
 EOF
 ln -sf /etc/nginx/sites-available/wiretide /etc/nginx/sites-enabled/wiretide
+
+# Remove default Nginx site to avoid conflicts
+if [ -L /etc/nginx/sites-enabled/default ] || [ -f /etc/nginx/sites-enabled/default ]; then
+    echo "[*] Removing default Nginx site to avoid port 80 conflicts..."
+    rm -f /etc/nginx/sites-enabled/default
+fi
+
 systemctl restart nginx
 
 # Systemd + permissions
@@ -270,7 +282,7 @@ echo "Username: admin"
 echo "Password: wiretide"
 echo "API Token (for agents): $API_TOKEN"
 echo "CA Download: https://$IP/ca.crt"
-echo "Agent Installer (HTTP bootstrap): http://$IP/static/agent/install.sh"
+echo "Agent Installer (HTTP): http://$IP/static/agent/install.sh"
 echo "Full Agent Directory (HTTP): http://$IP/static/agent/"
 echo "==========================================="
 
