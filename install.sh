@@ -10,9 +10,9 @@ LOG_FILE="/var/log/wiretide.log"
 REPO_URL="https://github.com/simonsays-techtalk/wiretide-controller.git"
 PYTHON_BIN="/usr/bin/python3"
 
-echo "[*] Installing Wiretide Controller with CA support..."
+echo "[*] Installing Wiretide Controller with CA + Agent Bundling..."
 
-# Install system dependencies
+# Install dependencies
 apt update && apt install -y nginx python3-venv python3-pip sqlite3 openssl git curl
 
 git config --global --add safe.directory "$WIRETIDE_DIR" || true
@@ -78,70 +78,133 @@ fi
 
 ### --- CA & CERT SETUP ---
 echo "[*] Setting up CA and server TLS cert..."
-# Create root CA if missing
 if [ ! -f "$CERT_DIR/wiretide-ca.crt" ]; then
     openssl genrsa -out "$CERT_DIR/wiretide-ca.key" 4096
     openssl req -x509 -new -nodes -key "$CERT_DIR/wiretide-ca.key" -sha256 -days 3650 \
       -subj "/CN=Wiretide Root CA" -out "$CERT_DIR/wiretide-ca.crt"
 fi
 
-# Always create a new server cert signed by the CA
 openssl genrsa -out "$CERT_DIR/wiretide.key" 4096
 openssl req -new -key "$CERT_DIR/wiretide.key" -subj "/CN=wiretide" -out "$CERT_DIR/wiretide.csr"
 openssl x509 -req -in "$CERT_DIR/wiretide.csr" -CA "$CERT_DIR/wiretide-ca.crt" -CAkey "$CERT_DIR/wiretide-ca.key" \
   -CAcreateserial -out "$CERT_DIR/wiretide.crt" -days 825 -sha256
 
-# Make the CA cert available to agents
 cp "$CERT_DIR/wiretide-ca.crt" "$STATIC_DIR/ca.crt"
 chown www-data:www-data "$STATIC_DIR/ca.crt"
 
-### --- GENERATE AGENT INSTALLER WITH CONTROLLER IP ---
+### --- AGENT PACKAGE ---
 IP=$(hostname -I | awk '{print $1}')
+
+# Agent installer (with controller URL baked in)
 cat > "$AGENT_DIR/install.sh" <<EOF
 #!/bin/sh
 set -e
 
+echo ">>> Wiretide Agent Installer"
 CONTROLLER_URL="https://$IP"
+echo ">> Using controller: \$CONTROLLER_URL"
+echo "\$CONTROLLER_URL" > /etc/wiretide-controller
 
-echo "[*] Installing Wiretide Agent for controller at \$CONTROLLER_URL..."
-
-# Download and trust CA cert
-wget --no-check-certificate -O /etc/wiretide-ca.crt "\$CONTROLLER_URL/ca.crt"
+CA_PATH="/etc/wiretide-ca.crt"
+wget --no-check-certificate -qO "\$CA_PATH" "\$CONTROLLER_URL/ca.crt" || {
+  echo "❌ Failed to download CA cert"
+  exit 1
+}
+chmod 644 "\$CA_PATH"
 mkdir -p /etc/ssl/certs
-cp /etc/wiretide-ca.crt /etc/ssl/certs/
-echo "[*] CA certificate installed."
+cp "\$CA_PATH" /etc/ssl/certs/
 
-# Fetch agent files
-wget --no-check-certificate -O /etc/wiretide-agent-run "\$CONTROLLER_URL/static/agent/wiretide-agent-run"
-wget --no-check-certificate -O /etc/init.d/wiretide "\$CONTROLLER_URL/static/agent/wiretide-init"
-chmod +x /etc/wiretide-agent-run /etc/init.d/wiretide
+wget --no-check-certificate -qO /etc/wiretide-agent-run "\$CONTROLLER_URL/static/agent/wiretide-agent-run"
+chmod +x /etc/wiretide-agent-run
 
-# Enable service
+wget --no-check-certificate -qO /etc/init.d/wiretide "\$CONTROLLER_URL/static/agent/wiretide-init"
+chmod +x /etc/init.d/wiretide
+
 /etc/init.d/wiretide enable
 /etc/init.d/wiretide start
 
-echo "[*] Wiretide Agent installed and running (Controller: \$CONTROLLER_URL)."
+echo "✅ Wiretide Agent installed and running (Controller: \$CONTROLLER_URL)"
 EOF
 chmod +x "$AGENT_DIR/install.sh"
-chown www-data:www-data "$AGENT_DIR/install.sh"
 
-# Systemd service
+# Agent runtime
+cat > "$AGENT_DIR/wiretide-agent-run" <<'EOF'
+#!/bin/sh
+
+CONTROLLER_URL="$(cat /etc/wiretide-controller 2>/dev/null || echo 'https://127.0.0.1')"
+CA_CERT="/etc/wiretide-ca.crt"
+TOKEN_FILE="/etc/wiretide-token"
+INTERVAL=60
+POLL_DELAY=10
+DEBUG_LOG="/tmp/wiretide-debug.log"
+
+IFACE=""
+[ -d /sys/class/net/br-lan ] && IFACE="br-lan"
+[ -z "$IFACE" ] && IFACE="$(ip route | awk '/default/ {print $5}' | head -n1)"
+[ -z "$IFACE" ] && IFACE="$(ip -o link show | awk -F': ' '/state UP/ && $2 != "lo" {print $2; exit}')"
+MAC="$(ip link show "$IFACE" 2>/dev/null | awk '/ether/ {print $2}')"
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$DEBUG_LOG"; }
+
+fetch_token() {
+    log "Requesting token for MAC: $MAC"
+    TOKEN=$(curl --cacert "$CA_CERT" -sSf -X GET "$CONTROLLER_URL/token/$MAC" || echo "")
+    if [ -n "$TOKEN" ]; then
+        echo "$TOKEN" > "$TOKEN_FILE"
+        log "Received token and saved"
+    else
+        log "Token fetch failed, waiting for approval"
+    fi
+}
+
+status_update() {
+    [ ! -f "$TOKEN_FILE" ] && return 1
+    TOKEN="$(cat "$TOKEN_FILE")"
+    RESPONSE=$(curl --cacert "$CA_CERT" -s -w "%{http_code}" -o /dev/null \
+        -H "Authorization: Bearer $TOKEN" \
+        "$CONTROLLER_URL/status/$MAC")
+    if [ "$RESPONSE" -eq 401 ]; then
+        log "Token expired, refetching..."
+        rm -f "$TOKEN_FILE"
+        fetch_token
+    fi
+}
+
+log "Starting Wiretide agent (Controller: $CONTROLLER_URL, MAC: $MAC)"
+while [ ! -f "$TOKEN_FILE" ]; do
+    fetch_token
+    [ -f "$TOKEN_FILE" ] || sleep "$POLL_DELAY"
+done
+while true; do
+    status_update
+    sleep "$INTERVAL"
+done
+EOF
+chmod +x "$AGENT_DIR/wiretide-agent-run"
+
+# Init script
+cat > "$AGENT_DIR/wiretide-init" <<'EOF'
+#!/bin/sh /etc/rc.common
+START=99
+start() { /etc/wiretide-agent-run & }
+stop() { kill "$(pgrep -f wiretide-agent-run)" 2>/dev/null; }
+EOF
+chmod +x "$AGENT_DIR/wiretide-init"
+
+### --- Finish Controller Setup ---
 cp wiretide.service /etc/systemd/system/wiretide.service
 systemctl daemon-reload
 systemctl enable --now wiretide.service
 
-# Nginx proxy
 cp nginx.conf /etc/nginx/sites-available/wiretide
 ln -sf /etc/nginx/sites-available/wiretide /etc/nginx/sites-enabled/wiretide
 systemctl restart nginx
 
-# Sudo permissions for www-data
 sudo bash -c 'cat >/etc/sudoers.d/wiretide' <<'EOF'
 www-data ALL=(ALL) NOPASSWD: /bin/systemctl restart wiretide.service
 EOF
 chmod 440 /etc/sudoers.d/wiretide
 
-# Health check
 sleep 3
 if ! curl -sk https://127.0.0.1/ > /dev/null; then
     echo "[!] Wiretide may not be running. Logs:"
@@ -158,7 +221,6 @@ echo "Username: admin"
 echo "Password: wiretide"
 echo "API Token (for agents): $API_TOKEN"
 echo "CA Download: https://$IP/ca.crt"
-echo "Agent Installer (Has controller IP set):"
-echo "  https://$IP/static/agent/install.sh"
+echo "Agent Installer: https://$IP/static/agent/install.sh"
 echo "==========================================="
 
