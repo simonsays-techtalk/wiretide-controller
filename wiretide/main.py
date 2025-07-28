@@ -5,18 +5,17 @@ from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 import os
 from wiretide.api import roles
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 app = FastAPI()  # <-- Define app FIRST
 
 # Directories
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-STATIC_DIR = os.path.join(BASE_DIR, "static")
+STATIC_DIR = "/opt/wiretide/wiretide/static"
 
 # Initialize logging (rotating file handler)
 import wiretide.logging  # Sets up /var/log/wiretide.log
 
-# Mount static first so it's always served (logo, agent files, etc.)
+# Mount static (logo, agent files, CA cert)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 print(f"Mounting static files from: {STATIC_DIR}")
 
@@ -48,18 +47,15 @@ app.include_router(auth.router)
 app.include_router(ui.router)
 app.include_router(devices.router)
 app.include_router(settings.router)
-app.include_router(system.router, prefix="/api")  # <-- Apply prefix here
+app.include_router(system.router, prefix="/api")
 app.include_router(backup.router)
 app.include_router(logs.router)
 app.include_router(clients.router)
 app.include_router(roles.router)
 
-# Debug endpoint (optional, can be removed later)
-@app.get("/debug/files")
-async def debug_files():
-    import os
-    return {"dir": STATIC_DIR, "files": os.listdir(STATIC_DIR)}
-
-
-app.mount("/static", StaticFiles(directory="/opt/wiretide/wiretide/static"), name="static")
+# Shortcut for CA certificate (agents will wget this directly)
+@app.get("/ca.crt")
+async def get_ca():
+    ca_path = os.path.join(STATIC_DIR, "ca.crt")
+    return FileResponse(ca_path)
 
