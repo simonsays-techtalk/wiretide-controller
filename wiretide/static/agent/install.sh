@@ -3,15 +3,14 @@ set -e
 
 echo ">>> Wiretide Agent Installer"
 
-# This value is baked in by the controller installer during its setup
+# This placeholder will be replaced by the controller installer
 CONTROLLER_URL="__CONTROLLER_URL__"
-
 echo ">> Using controller: $CONTROLLER_URL"
 
-# Store controller URL for the runtime agent
+# Store controller URL for runtime agent
 echo "$CONTROLLER_URL" > /etc/wiretide-controller
 
-# Fetch and trust CA cert (ignore TLS just for bootstrap)
+# Download and trust CA certificate (skip verification only for this fetch)
 CA_PATH="/etc/wiretide-ca.crt"
 wget --no-check-certificate -qO "$CA_PATH" "$CONTROLLER_URL/ca.crt" || {
   echo "❌ Failed to download CA cert"
@@ -20,30 +19,18 @@ wget --no-check-certificate -qO "$CA_PATH" "$CONTROLLER_URL/ca.crt" || {
 chmod 644 "$CA_PATH"
 mkdir -p /etc/ssl/certs
 cp "$CA_PATH" /etc/ssl/certs/
-echo "✅ CA cert installed to $CA_PATH"
+echo "✅ CA cert installed"
 
-# Fetch agent runtime script and init script
-echo ">> Downloading agent scripts..."
-wget --no-check-certificate -qO /etc/wiretide-agent-run "$CONTROLLER_URL/static/agent/wiretide-agent-run" || {
-  echo "❌ Failed to download wiretide-agent-run"
-  exit 1
-}
+# Download agent runtime and init scripts
+wget --no-check-certificate -qO /etc/wiretide-agent-run "$CONTROLLER_URL/static/agent/wiretide-agent-run"
 chmod +x /etc/wiretide-agent-run
 
-wget --no-check-certificate -qO /etc/init.d/wiretide "$CONTROLLER_URL/static/agent/wiretide-init" || {
-  echo "❌ Failed to download wiretide-init"
-  exit 1
-}
+wget --no-check-certificate -qO /etc/init.d/wiretide "$CONTROLLER_URL/static/agent/wiretide-init"
 chmod +x /etc/init.d/wiretide
 
 # Enable and start agent
-echo ">> Enabling + starting agent"
-if command -v /etc/init.d/wiretide >/dev/null; then
-  /etc/init.d/wiretide enable
-  /etc/init.d/wiretide start
-else
-  echo "⚠️ Warning: Init script install may have failed"
-fi
+/etc/init.d/wiretide enable
+/etc/init.d/wiretide start
 
-echo "✅ Wiretide agent installed and running (Controller: $CONTROLLER_URL)"
+echo "✅ Wiretide Agent installed and running (Controller: $CONTROLLER_URL)"
 

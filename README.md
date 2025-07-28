@@ -26,6 +26,12 @@ wget https://raw.githubusercontent.com/simonsays-techtalk/wiretide-controller/ma
 chmod +x install.sh
 sudo ./install.sh
 ```
+
+```
+Install on openwrt device
+wget -O - https://<controller-ip>/static/agent/install.sh | sh
+```
+
 After installation:
 
     Access the controller via your browser: https://<server-ip>/

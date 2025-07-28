@@ -3,11 +3,11 @@
 CONTROLLER_URL="$(cat /etc/wiretide-controller 2>/dev/null || echo 'https://127.0.0.1')"
 CA_CERT="/etc/wiretide-ca.crt"
 TOKEN_FILE="/etc/wiretide-token"
-INTERVAL=60       # Time between status polls (seconds)
-POLL_DELAY=10     # Time between register retries (seconds)
+INTERVAL=60       # Polling interval
+POLL_DELAY=10     # Wait time between register attempts
 DEBUG_LOG="/tmp/wiretide-debug.log"
 
-# Determine MAC (identity)
+# Determine MAC (device identity)
 IFACE=""
 [ -d /sys/class/net/br-lan ] && IFACE="br-lan"
 [ -z "$IFACE" ] && IFACE="$(ip route | awk '/default/ {print $5}' | head -n1)"
@@ -19,21 +19,20 @@ log() {
 }
 
 fetch_token() {
-    # Request a token (controller handles approval)
     log "Requesting token for MAC: $MAC"
     TOKEN=$(curl --cacert "$CA_CERT" -sSf -X GET "$CONTROLLER_URL/token/$MAC" || echo "")
     if [ -n "$TOKEN" ]; then
         echo "$TOKEN" > "$TOKEN_FILE"
         log "Received token and saved to $TOKEN_FILE"
     else
-        log "Token fetch failed, will retry"
+        log "Token fetch failed (device may not be approved yet). Retrying..."
     fi
 }
 
 status_update() {
     [ ! -f "$TOKEN_FILE" ] && return 1
     TOKEN="$(cat "$TOKEN_FILE")"
-    log "Sending status update to controller..."
+    log "Sending status update..."
     RESPONSE=$(curl --cacert "$CA_CERT" -s -w "%{http_code}" -o /dev/null \
         -H "Authorization: Bearer $TOKEN" \
         "$CONTROLLER_URL/status/$MAC")
@@ -44,19 +43,15 @@ status_update() {
     fi
 }
 
-# Main loop
-log "Starting Wiretide agent. Controller: $CONTROLLER_URL, MAC: $MAC"
+log "Starting Wiretide agent (Controller: $CONTROLLER_URL, MAC: $MAC)"
 
-# Wait for admin approval (register loop)
+# Registration + approval wait loop
 while [ ! -f "$TOKEN_FILE" ]; do
     fetch_token
-    if [ ! -f "$TOKEN_FILE" ]; then
-        log "Waiting for admin approval..."
-        sleep "$POLL_DELAY"
-    fi
+    [ -f "$TOKEN_FILE" ] || sleep "$POLL_DELAY"
 done
 
-# Poll loop
+# Main poll loop
 while true; do
     status_update
     sleep "$INTERVAL"
