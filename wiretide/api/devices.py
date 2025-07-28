@@ -7,14 +7,11 @@ import json
 import enum
 from wiretide.tokens import get_shared_token
 from wiretide.db import DB_PATH
-from wiretide.api.auth import require_login
+from wiretide.api.auth import require_login, require_api_token
 from fastapi.templating import Jinja2Templates
 from wiretide.models import DeviceStatus
-from wiretide.api.auth import require_login, require_api_token
-from fastapi import Depends
 
 templates = Jinja2Templates(directory="wiretide/templates")
-
 router = APIRouter()
 
 # --- Models ---
@@ -33,7 +30,7 @@ class DeviceType(str, enum.Enum):
 
 # --- Endpoints ---
 @router.post("/register")
-async def register_device(device: DeviceRegistration, request: Request, _: str = Depends(require_api_token)):
+async def register_device(device: DeviceRegistration, request: Request):
     ip = request.client.host
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT id, status FROM devices WHERE mac = ?", (device.mac,)) as cursor:
@@ -43,8 +40,8 @@ async def register_device(device: DeviceRegistration, request: Request, _: str =
             device_id, current_status = existing
             new_status = 'waiting' if current_status == 'removed' else current_status
             await db.execute(
-                "UPDATE devices SET ip = ?, last_seen = ?, status = ? WHERE id = ?",
-                (ip, datetime.utcnow(), new_status, device_id)
+                "UPDATE devices SET hostname = ?, ip = ?, last_seen = ?, status = ? WHERE id = ?",
+                (device.hostname, ip, datetime.utcnow(), new_status, device_id)
             )
         else:
             await db.execute(
@@ -62,20 +59,18 @@ async def device_status(status: DeviceStatus, request: Request, _: str = Depends
     mac_lower = status.mac.lower()
 
     async with aiosqlite.connect(DB_PATH) as db:
-        # Store full payload (including clients) in status_json
         await db.execute("""
             UPDATE devices
-            SET ip = ?, ssh_enabled = ?, last_seen = ?, status_json = ?
+            SET ip = ?, ssh_enabled = ?, last_seen = ?, hostname = ?, status_json = ?
             WHERE mac = ? AND status != 'removed'
-        """, (client_ip, status.ssh_enabled, now, json.dumps(status.dict()), mac_lower))
+        """, (client_ip, status.ssh_enabled, now, status.hostname, json.dumps(status.dict()), mac_lower))
 
-        # Update summary in device_status (quick lookups)
         if status.settings:
             model = status.settings.get("model")
             wan_ip = status.settings.get("wan_ip")
             dns = status.settings.get("dns") or []
             ntp_synced = bool(status.settings.get("ntp"))
-            firewall_state = "enabled" if status.settings.get("firewall") else "disabled"
+            fw_state = "enabled" if status.settings.get("firewall") else "disabled"
 
             await db.execute("""
                 INSERT INTO device_status (mac, model, wan_ip, dns_servers, ntp_synced, firewall_state, updated_at)
@@ -87,34 +82,25 @@ async def device_status(status: DeviceStatus, request: Request, _: str = Depends
                   ntp_synced = excluded.ntp_synced,
                   firewall_state = excluded.firewall_state,
                   updated_at = excluded.updated_at
-            """, (
-                mac_lower, model, wan_ip, json.dumps(dns),
-                ntp_synced, firewall_state, now
-            ))
+            """, (mac_lower, model, wan_ip, json.dumps(dns), ntp_synced, fw_state, now))
         await db.commit()
 
 @router.get("/config")
 async def get_config(request: Request, _: str = Depends(require_api_token)):
     """Return queued config for an approved device."""
     mac = request.headers.get("X-MAC", "").lower()
-
     if not mac:
         raise HTTPException(status_code=401)
-
     async with aiosqlite.connect(DB_PATH) as db:
-        # Ensure the device exists and is approved
         cursor = await db.execute("SELECT approved FROM devices WHERE mac = ?", (mac,))
         row = await cursor.fetchone()
         if not row or not row[0]:
             raise HTTPException(status_code=403, detail="Unauthorized or unapproved")
-
         cursor = await db.execute("SELECT config FROM device_configs WHERE mac = ?", (mac,))
         row = await cursor.fetchone()
         if not row:
             return JSONResponse({"config": {}, "available": False})
-
         return JSONResponse({"config": json.loads(row[0]), "available": True})
-
 
 @router.get("/api/devices")
 async def list_devices(_: str = Depends(require_login)):
@@ -137,7 +123,6 @@ async def list_devices(_: str = Depends(require_login)):
         } for row in rows
     ])
 
-
 @router.post("/api/approve")
 async def approve_device(mac: str = Form(...), device_type: str = Form(...), _: str = Depends(require_login)):
     if device_type not in [t.value for t in DeviceType if t != DeviceType.unknown]:
@@ -151,14 +136,12 @@ async def approve_device(mac: str = Form(...), device_type: str = Form(...), _: 
         await db.commit()
     return {"status": "approved"}
 
-
 @router.post("/api/deny")
 async def deny_device(mac: str = Form(...), _: str = Depends(require_login)):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE devices SET status = 'denied' WHERE mac = ?", (mac,))
         await db.commit()
     return {"status": "denied"}
-
 
 @router.post("/api/block")
 async def block_device(mac: str = Form(...), _: str = Depends(require_login)):
@@ -167,14 +150,12 @@ async def block_device(mac: str = Form(...), _: str = Depends(require_login)):
         await db.commit()
     return {"status": "blocked"}
 
-
 @router.post("/api/remove")
 async def remove_device(mac: str = Form(...), _: str = Depends(require_login)):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE devices SET status = 'removed' WHERE mac = ?", (mac,))
         await db.commit()
     return {"status": "removed"}
-
 
 @router.get("/clients/{device_type}/{mac}", response_class=HTMLResponse)
 async def device_page(device_type: str, mac: str, request: Request, _: str = Depends(require_login)):
@@ -219,7 +200,6 @@ async def device_page(device_type: str, mac: str, request: Request, _: str = Dep
         "settings": settings
     })
 
-
 @router.post("/api/queue-config")
 async def queue_config(mac: str = Form(...), config_json: str = Form(...), _: str = Depends(require_login)):
     try:
@@ -236,7 +216,6 @@ async def queue_config(mac: str = Form(...), config_json: str = Form(...), _: st
         await db.commit()
     return {"status": "queued"}
 
-
 @router.get("/token/{mac}")
 async def get_device_token(mac: str, request: Request):
     token = await get_shared_token()
@@ -246,3 +225,4 @@ async def get_device_token(mac: str, request: Request):
         if not row or not row[0]:
             raise HTTPException(status_code=403, detail="Device not approved")
     return {"token": token}
+
