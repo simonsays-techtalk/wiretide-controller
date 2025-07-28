@@ -1,222 +1,64 @@
 #!/bin/sh
 
-CONTROLLER_URL="https://192.168.188.3"
+CONTROLLER_URL="$(cat /etc/wiretide-controller 2>/dev/null || echo 'https://127.0.0.1')"
 CA_CERT="/etc/wiretide-ca.crt"
 TOKEN_FILE="/etc/wiretide-token"
-INTERVAL=60
-POLL_DELAY=10
-
-PAYLOAD_FILE="/tmp/wiretide-last-payload.json"
+INTERVAL=60       # Time between status polls (seconds)
+POLL_DELAY=10     # Time between register retries (seconds)
 DEBUG_LOG="/tmp/wiretide-debug.log"
 
-# Prefer br-lan MAC for identity; fallback to default route, then first UP interface
+# Determine MAC (identity)
 IFACE=""
 [ -d /sys/class/net/br-lan ] && IFACE="br-lan"
 [ -z "$IFACE" ] && IFACE="$(ip route | awk '/default/ {print $5}' | head -n1)"
 [ -z "$IFACE" ] && IFACE="$(ip -o link show | awk -F': ' '/state UP/ && $2 != "lo" {print $2; exit}')"
-
-MAC="$(ip link show "$IFACE" 2>/dev/null | awk '/ether/ {print $2}' | head -n1)"
-DEVICE_IP="$(ip -4 addr show "$IFACE" 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1 | head -n1)"
-
-HOSTNAME="$(uci get system.@system[0].hostname)"
-FPR="$(dropbearkey -y -f /etc/dropbear/dropbear_rsa_host_key 2>/dev/null | grep Fingerprint | awk -F': ' '{print $2}')"
-MODEL="$(cat /tmp/sysinfo/model 2>/dev/null)"
+MAC="$(ip link show "$IFACE" 2>/dev/null | awk '/ether/ {print $2}')"
 
 log() {
-  echo "$(date) $1" >> /tmp/wiretide-agent.log
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$DEBUG_LOG"
 }
 
 fetch_token() {
-  while true; do
-    log "Polling for token..."
-    RESPONSE="$(curl -k --cacert "$CA_CERT" -s -w '\n%{http_code}' "$CONTROLLER_URL/token/$MAC")"
-    BODY="$(echo "$RESPONSE" | head -n1)"
-    HTTP_CODE="$(echo "$RESPONSE" | tail -n1)"
-
-    if [ "$HTTP_CODE" = "200" ]; then
-      TOKEN="$(echo "$BODY" | grep -oE '"token"\s*:\s*"[^"]+"' | cut -d'"' -f4)"
-      if [ -n "$TOKEN" ]; then
-        echo "$TOKEN" | tr -d '\r\n' > "$TOKEN_FILE"
-        chmod 600 "$TOKEN_FILE"
-        log "Token received and saved"
-        return 0
-      else
-        log "Failed to extract token from: $BODY"
-      fi
-    elif [ "$HTTP_CODE" = "403" ]; then
-      log "Device not approved yet, retrying in $POLL_DELAY seconds..."
+    # Request a token (controller handles approval)
+    log "Requesting token for MAC: $MAC"
+    TOKEN=$(curl --cacert "$CA_CERT" -sSf -X GET "$CONTROLLER_URL/token/$MAC" || echo "")
+    if [ -n "$TOKEN" ]; then
+        echo "$TOKEN" > "$TOKEN_FILE"
+        log "Received token and saved to $TOKEN_FILE"
     else
-      log "Unexpected HTTP $HTTP_CODE while fetching token"
+        log "Token fetch failed, will retry"
     fi
-    sleep "$POLL_DELAY"
-  done
 }
 
-register_and_send_status() {
-  build_data
-  curl -k --cacert "$CA_CERT" -s -X POST "$CONTROLLER_URL/register" \
-       -H "Content-Type: application/json" \
-       -d @"$PAYLOAD_FILE"
-  log "Registered with controller"
+status_update() {
+    [ ! -f "$TOKEN_FILE" ] && return 1
+    TOKEN="$(cat "$TOKEN_FILE")"
+    log "Sending status update to controller..."
+    RESPONSE=$(curl --cacert "$CA_CERT" -s -w "%{http_code}" -o /dev/null \
+        -H "Authorization: Bearer $TOKEN" \
+        "$CONTROLLER_URL/status/$MAC")
+    if [ "$RESPONSE" -eq 401 ]; then
+        log "Token expired, refetching..."
+        rm -f "$TOKEN_FILE"
+        fetch_token
+    fi
 }
 
-build_data() {
-  DNS_RAW="$(uci get dhcp.@dnsmasq[0].server 2>/dev/null)"
-  [ -z "$DNS_RAW" ] && DNS_RAW="$(grep '^nameserver' /tmp/resolv.conf 2>/dev/null | awk '{print $2}' | grep -v '^127\.' | grep -v '^::')"
+# Main loop
+log "Starting Wiretide agent. Controller: $CONTROLLER_URL, MAC: $MAC"
 
-  DNS_LIST=""
-  for IP in $DNS_RAW; do
-    IP_CLEANED=$(echo "$IP" | tr -d '"')
-    [ -n "$DNS_LIST" ] && DNS_LIST="$DNS_LIST, \"$IP_CLEANED\"" || DNS_LIST="\"$IP_CLEANED\""
-  done
-
-  if /etc/init.d/firewall enabled && /etc/init.d/firewall status >/dev/null 2>&1; then
-    FIREWALL_ENABLED=true
-  else
-    FIREWALL_ENABLED=false
-  fi
-  NTP_ENABLED="$(uci get system.ntp.enabled 2>/dev/null || echo false)"
-
-  CLIENTS=""
-  SEEN_MACS="/tmp/wt-seen-macs"
-  > "$SEEN_MACS"
-
-  # Wi-Fi stations (always add, even without IP)
-  iw dev 2>/dev/null | awk '/Interface/ {print $2}' > /tmp/wt-ifaces
-  while read -r DEV; do
-    iw dev "$DEV" station dump 2>/dev/null | awk '/Station/ {print $2}' | tr 'A-Z' 'a-z' > /tmp/wt-wifi-macs
-    while read -r STA; do
-      echo "$STA" >> "$SEEN_MACS"
-      CLIENTS="$CLIENTS"'
-{
-  "mac": "'"$STA"'",
-  "ip": "unknown",
-  "hostname": "unknown",
-  "interface": "'"$DEV"'",
-  "connected_via": "wifi",
-  "rx_bytes": 0,
-  "tx_bytes": 0
-},'
-    done < /tmp/wt-wifi-macs
-  done < /tmp/wt-ifaces
-  rm -f /tmp/wt-ifaces /tmp/wt-wifi-macs
-
-  # DHCP leases (hostname + IP)
-  if [ -f /tmp/dhcp.leases ]; then
-    awk '{print tolower($2)","$3","$4}' /tmp/dhcp.leases > /tmp/wt-dhcp
-    while IFS=, read -r CMAC CIP CHOST; do
-      echo "$CIP" | grep -q '^fe80::' && continue
-      grep -q "$CMAC" "$SEEN_MACS" && continue
-      echo "$CMAC" >> "$SEEN_MACS"
-      [ -z "$CHOST" ] && CHOST="unknown"
-      CLIENTS="$CLIENTS"'
-{
-  "mac": "'"$CMAC"'",
-  "ip": "'"$CIP"'",
-  "hostname": "'"$CHOST"'",
-  "interface": "unknown",
-  "connected_via": "ethernet",
-  "rx_bytes": 0,
-  "tx_bytes": 0
-},'
-    done < /tmp/wt-dhcp
-    rm -f /tmp/wt-dhcp
-  fi
-
-  # ARP neighbors (static IPs)
-  ip neigh show | awk '{print tolower($1)","tolower($5)}' > /tmp/wt-arp
-  while IFS=, read -r IP_ENTRY MAC_ENTRY; do
-    echo "$IP_ENTRY" | grep -q '^fe80::' && continue
-    grep -q "$MAC_ENTRY" "$SEEN_MACS" && continue
-    echo "$MAC_ENTRY" >> "$SEEN_MACS"
-    CLIENTS="$CLIENTS"'
-{
-  "mac": "'"$MAC_ENTRY"'",
-  "ip": "'"$IP_ENTRY"'",
-  "hostname": "unknown",
-  "interface": "unknown",
-  "connected_via": "ethernet",
-  "rx_bytes": 0,
-  "tx_bytes": 0
-},'
-  done < /tmp/wt-arp
-  rm -f /tmp/wt-arp "$SEEN_MACS"
-
-  CLIENTS="${CLIENTS%,}"  # strip last comma
-
-  SETTINGS=$(cat <<EOF
-{
-  "model": "$MODEL",
-  "device_ip": "$DEVICE_IP",
-  "dns": [ $DNS_LIST ],
-  "firewall": $FIREWALL_ENABLED,
-  "ntp": $NTP_ENABLED
-}
-EOF
-)
-
-  cat <<EOF > "$PAYLOAD_FILE"
-{
-  "hostname": "$HOSTNAME",
-  "mac": "$MAC",
-  "ssh_fingerprint": "$FPR",
-  "ssh_enabled": true,
-  "settings": $SETTINGS,
-  "clients": [ $CLIENTS ]
-}
-EOF
-
-  log "Payload written to $PAYLOAD_FILE"
-}
-
-log "Starting Wiretide agent"
-register_and_send_status
-
-if [ -s "$TOKEN_FILE" ]; then
-  TOKEN="$(cat "$TOKEN_FILE" | tr -d '\r\n')"
-  AUTH_HEADER="Authorization: Bearer $TOKEN"
-
-  build_data
-  HTTP_CODE=$(curl -k --cacert "$CA_CERT" -vk --max-time 10 -w '%{http_code}' -o "$DEBUG_LOG" \
-    -X POST "$CONTROLLER_URL/status" \
-    -H "Content-Type: application/json" \
-    -H "$AUTH_HEADER" \
-    -d @"$PAYLOAD_FILE")
-
-  log "Status update (init) HTTP $HTTP_CODE"
-else
-  log "Token file missing — fetching new token"
-  fetch_token
-fi
-
-log "Entering status loop"
-while true; do
-  sleep "$INTERVAL"
-
-  [ ! -s "$TOKEN_FILE" ] && {
-    log "Token file missing during loop — re-registering"
-    register_and_send_status
+# Wait for admin approval (register loop)
+while [ ! -f "$TOKEN_FILE" ]; do
     fetch_token
-    continue
-  }
-
-  TOKEN="$(cat "$TOKEN_FILE" | tr -d '\r\n')"
-  AUTH_HEADER="Authorization: Bearer $TOKEN"
-
-  build_data
-  log "Sending status update"
-  HTTP_CODE=$(curl -k --cacert "$CA_CERT" -vk --max-time 10 -w '%{http_code}' -o "$DEBUG_LOG" \
-    -X POST "$CONTROLLER_URL/status" \
-    -H "Content-Type: application/json" \
-    -H "$AUTH_HEADER" \
-    -d @"$PAYLOAD_FILE")
-
-  log "Status update response: HTTP $HTTP_CODE"
-
-  [ "$HTTP_CODE" = "401" ] || [ "$HTTP_CODE" = "403" ] && {
-    log "Token rejected — deleting and re-registering"
-    rm -f "$TOKEN_FILE"
-    register_and_send_status
-    fetch_token
-  }
+    if [ ! -f "$TOKEN_FILE" ]; then
+        log "Waiting for admin approval..."
+        sleep "$POLL_DELAY"
+    fi
 done
+
+# Poll loop
+while true; do
+    status_update
+    sleep "$INTERVAL"
+done
+

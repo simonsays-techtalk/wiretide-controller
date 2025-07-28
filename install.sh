@@ -4,6 +4,7 @@ set -e
 WIRETIDE_DIR="/opt/wiretide"
 CERT_DIR="/etc/wiretide/certs"
 STATIC_DIR="$WIRETIDE_DIR/wiretide/static"
+AGENT_DIR="$STATIC_DIR/agent"
 DB_FILE="$WIRETIDE_DIR/wiretide.db"
 LOG_FILE="/var/log/wiretide.log"
 REPO_URL="https://github.com/simonsays-techtalk/wiretide-controller.git"
@@ -38,7 +39,7 @@ pip install --upgrade pip
 pip install -r requirements.txt
 deactivate
 
-mkdir -p "$STATIC_DIR"
+mkdir -p "$STATIC_DIR" "$AGENT_DIR"
 chown -R www-data:www-data "$STATIC_DIR"
 
 # Placeholder logo
@@ -94,6 +95,36 @@ openssl x509 -req -in "$CERT_DIR/wiretide.csr" -CA "$CERT_DIR/wiretide-ca.crt" -
 cp "$CERT_DIR/wiretide-ca.crt" "$STATIC_DIR/ca.crt"
 chown www-data:www-data "$STATIC_DIR/ca.crt"
 
+### --- GENERATE AGENT INSTALLER WITH CONTROLLER IP ---
+IP=$(hostname -I | awk '{print $1}')
+cat > "$AGENT_DIR/install.sh" <<EOF
+#!/bin/sh
+set -e
+
+CONTROLLER_URL="https://$IP"
+
+echo "[*] Installing Wiretide Agent for controller at \$CONTROLLER_URL..."
+
+# Download and trust CA cert
+wget --no-check-certificate -O /etc/wiretide-ca.crt "\$CONTROLLER_URL/ca.crt"
+mkdir -p /etc/ssl/certs
+cp /etc/wiretide-ca.crt /etc/ssl/certs/
+echo "[*] CA certificate installed."
+
+# Fetch agent files
+wget --no-check-certificate -O /etc/wiretide-agent-run "\$CONTROLLER_URL/static/agent/wiretide-agent-run"
+wget --no-check-certificate -O /etc/init.d/wiretide "\$CONTROLLER_URL/static/agent/wiretide-init"
+chmod +x /etc/wiretide-agent-run /etc/init.d/wiretide
+
+# Enable service
+/etc/init.d/wiretide enable
+/etc/init.d/wiretide start
+
+echo "[*] Wiretide Agent installed and running (Controller: \$CONTROLLER_URL)."
+EOF
+chmod +x "$AGENT_DIR/install.sh"
+chown www-data:www-data "$AGENT_DIR/install.sh"
+
 # Systemd service
 cp wiretide.service /etc/systemd/system/wiretide.service
 systemctl daemon-reload
@@ -119,7 +150,6 @@ else
     echo "[*] Wiretide is up and reachable locally."
 fi
 
-IP=$(hostname -I | awk '{print $1}')
 echo "==========================================="
 echo " Wiretide Controller Installed Successfully"
 echo "-------------------------------------------"
@@ -128,5 +158,7 @@ echo "Username: admin"
 echo "Password: wiretide"
 echo "API Token (for agents): $API_TOKEN"
 echo "CA Download: https://$IP/ca.crt"
+echo "Agent Installer (Has controller IP set):"
+echo "  https://$IP/static/agent/install.sh"
 echo "==========================================="
 
