@@ -12,7 +12,6 @@ PYTHON_BIN="/usr/bin/python3"
 
 echo "[*] Installing Wiretide Controller with CA + Agent Bundling..."
 
-# Install dependencies
 apt update && apt install -y nginx python3-venv python3-pip sqlite3 openssl git curl
 
 git config --global --add safe.directory "$WIRETIDE_DIR" || true
@@ -95,7 +94,7 @@ chown www-data:www-data "$STATIC_DIR/ca.crt"
 ### --- AGENT PACKAGE ---
 IP=$(hostname -I | awk '{print $1}')
 
-# Agent installer (with controller URL baked in)
+# Agent installer (with controller URL baked in and cleanup logic)
 cat > "$AGENT_DIR/install.sh" <<EOF
 #!/bin/sh
 set -e
@@ -103,8 +102,19 @@ set -e
 echo ">>> Wiretide Agent Installer"
 CONTROLLER_URL="https://$IP"
 echo ">> Using controller: \$CONTROLLER_URL"
+
+# Stop and remove old agent (safe re-install)
+if [ -f /etc/init.d/wiretide ]; then
+    /etc/init.d/wiretide stop 2>/dev/null || true
+    /etc/init.d/wiretide disable 2>/dev/null || true
+fi
+killall -q wiretide-agent-run 2>/dev/null || true
+rm -f /etc/wiretide-agent-run /etc/init.d/wiretide /etc/wiretide-token
+
+# Save controller URL for agent runtime
 echo "\$CONTROLLER_URL" > /etc/wiretide-controller
 
+# Fetch CA certificate (ignore TLS just for this fetch)
 CA_PATH="/etc/wiretide-ca.crt"
 wget --no-check-certificate -qO "\$CA_PATH" "\$CONTROLLER_URL/ca.crt" || {
   echo "❌ Failed to download CA cert"
@@ -114,12 +124,14 @@ chmod 644 "\$CA_PATH"
 mkdir -p /etc/ssl/certs
 cp "\$CA_PATH" /etc/ssl/certs/
 
+# Download agent runtime + init scripts
 wget --no-check-certificate -qO /etc/wiretide-agent-run "\$CONTROLLER_URL/static/agent/wiretide-agent-run"
 chmod +x /etc/wiretide-agent-run
 
 wget --no-check-certificate -qO /etc/init.d/wiretide "\$CONTROLLER_URL/static/agent/wiretide-init"
 chmod +x /etc/init.d/wiretide
 
+# Enable and start agent
 /etc/init.d/wiretide enable
 /etc/init.d/wiretide start
 
@@ -127,7 +139,7 @@ echo "✅ Wiretide Agent installed and running (Controller: \$CONTROLLER_URL)"
 EOF
 chmod +x "$AGENT_DIR/install.sh"
 
-# Agent runtime
+# Agent runtime script
 cat > "$AGENT_DIR/wiretide-agent-run" <<'EOF'
 #!/bin/sh
 
@@ -191,14 +203,50 @@ stop() { kill "$(pgrep -f wiretide-agent-run)" 2>/dev/null; }
 EOF
 chmod +x "$AGENT_DIR/wiretide-init"
 
-### --- Finish Controller Setup ---
+### --- NGINX CONFIG ---
+cat > /etc/nginx/sites-available/wiretide <<'EOF'
+server {
+    listen 443 ssl;
+    server_name _;
+
+    ssl_certificate /etc/wiretide/certs/wiretide.crt;
+    ssl_certificate_key /etc/wiretide/certs/wiretide.key;
+
+    location /ca.crt {
+        alias /opt/wiretide/wiretide/static/ca.crt;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+server {
+    listen 80;
+    server_name _;
+
+    # Serve agent installer over HTTP (bootstrap)
+    location /static/agent/install.sh {
+        alias /opt/wiretide/wiretide/static/agent/install.sh;
+    }
+
+    # Redirect all other HTTP traffic to HTTPS
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+EOF
+ln -sf /etc/nginx/sites-available/wiretide /etc/nginx/sites-enabled/wiretide
+systemctl restart nginx
+
+# Systemd + permissions
 cp wiretide.service /etc/systemd/system/wiretide.service
 systemctl daemon-reload
 systemctl enable --now wiretide.service
-
-cp nginx.conf /etc/nginx/sites-available/wiretide
-ln -sf /etc/nginx/sites-available/wiretide /etc/nginx/sites-enabled/wiretide
-systemctl restart nginx
 
 sudo bash -c 'cat >/etc/sudoers.d/wiretide' <<'EOF'
 www-data ALL=(ALL) NOPASSWD: /bin/systemctl restart wiretide.service
@@ -221,6 +269,6 @@ echo "Username: admin"
 echo "Password: wiretide"
 echo "API Token (for agents): $API_TOKEN"
 echo "CA Download: https://$IP/ca.crt"
-echo "Agent Installer: https://$IP/static/agent/install.sh"
+echo "Agent Installer (HTTP bootstrap): http://$IP/static/agent/install.sh"
 echo "==========================================="
 
