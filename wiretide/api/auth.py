@@ -16,10 +16,11 @@ async def require_api_token(request: Request):
     if not token:
         raise HTTPException(status_code=400, detail="Missing API token")
 
+    # Validate against config.shared_token
     async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("SELECT token FROM tokens WHERE token = ?", (token,))
+        cursor = await db.execute("SELECT value FROM config WHERE key = 'shared_token'")
         row = await cursor.fetchone()
-        if not row:
+        if not row or token != row[0]:
             raise HTTPException(status_code=403, detail="Invalid API token")
 
 

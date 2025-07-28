@@ -67,7 +67,7 @@ async def device_status(status: DeviceStatus, request: Request, _: str = Depends
 
         if status.settings:
             model = status.settings.get("model")
-            wan_ip = status.settings.get("wan_ip")
+            wan_ip = status.settings.get("wan_ip") or status.settings.get("device_ip") or ""
             dns = status.settings.get("dns") or []
             ntp_synced = bool(status.settings.get("ntp"))
             fw_state = "enabled" if status.settings.get("firewall") else "disabled"
