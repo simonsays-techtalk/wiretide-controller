@@ -10,7 +10,7 @@ LOG_FILE="/var/log/wiretide.log"
 REPO_URL="https://github.com/simonsays-techtalk/wiretide-controller.git"
 PYTHON_BIN="/usr/bin/python3"
 
-echo "[*] Installing Wiretide Controller with CA + Agent Bundling..."
+echo "[*] Installing Wiretide Controller with SAN-enabled TLS and Agent Bundling..."
 
 apt update && apt install -y nginx python3-venv python3-pip sqlite3 openssl git curl
 
@@ -75,31 +75,50 @@ if [ -z "$API_TOKEN" ]; then
     echo "[*] Generated new API token for /register and /status"
 fi
 
-### --- CA & CERT SETUP ---
-echo "[*] Setting up CA and server TLS cert..."
+### --- CA & SAN TLS CERT SETUP ---
+echo "[*] Setting up CA and SAN-enabled TLS cert..."
+IP=$(hostname -I | awk '{print $1}')
 if [ ! -f "$CERT_DIR/wiretide-ca.crt" ]; then
     openssl genrsa -out "$CERT_DIR/wiretide-ca.key" 4096
     openssl req -x509 -new -nodes -key "$CERT_DIR/wiretide-ca.key" -sha256 -days 3650 \
       -subj "/CN=Wiretide Root CA" -out "$CERT_DIR/wiretide-ca.crt"
 fi
 
-openssl genrsa -out "$CERT_DIR/wiretide.key" 4096
-openssl req -new -key "$CERT_DIR/wiretide.key" -subj "/CN=wiretide" -out "$CERT_DIR/wiretide.csr"
-openssl x509 -req -in "$CERT_DIR/wiretide.csr" -CA "$CERT_DIR/wiretide-ca.crt" -CAkey "$CERT_DIR/wiretide-ca.key" \
-  -CAcreateserial -out "$CERT_DIR/wiretide.crt" -days 825 -sha256
+# Create OpenSSL config for SAN
+cat > "$CERT_DIR/openssl-san.cnf" <<EOF
+[req]
+default_bits = 4096
+distinguished_name = req_distinguished_name
+req_extensions = v3_req
+prompt = no
 
-# Fix cert permissions for Nginx
+[req_distinguished_name]
+CN = wiretide
+
+[v3_req]
+subjectAltName = @alt_names
+
+[alt_names]
+DNS.1 = wiretide
+IP.1 = $IP
+EOF
+
+# Generate SAN-enabled cert
+openssl genrsa -out "$CERT_DIR/wiretide.key" 4096
+openssl req -new -key "$CERT_DIR/wiretide.key" -out "$CERT_DIR/wiretide.csr" -config "$CERT_DIR/openssl-san.cnf"
+openssl x509 -req -in "$CERT_DIR/wiretide.csr" -CA "$CERT_DIR/wiretide-ca.crt" -CAkey "$CERT_DIR/wiretide-ca.key" \
+  -CAcreateserial -out "$CERT_DIR/wiretide.crt" -days 825 -sha256 -extensions v3_req -extfile "$CERT_DIR/openssl-san.cnf"
+
+# Fix permissions for Nginx
 chown root:www-data "$CERT_DIR/wiretide.key" "$CERT_DIR/wiretide.crt"
 chmod 640 "$CERT_DIR/wiretide.key"
 chmod 644 "$CERT_DIR/wiretide.crt"
 
+# Make CA cert available to agents
 cp "$CERT_DIR/wiretide-ca.crt" "$STATIC_DIR/ca.crt"
 chown www-data:www-data "$STATIC_DIR/ca.crt"
 
-### --- AGENT PACKAGE ---
-IP=$(hostname -I | awk '{print $1}')
-
-# Agent installer (with controller URL baked in and cleanup logic)
+### --- AGENT PACKAGE (with baked IP) ---
 cat > "$AGENT_DIR/install.sh" <<EOF
 #!/bin/sh
 set -e
@@ -119,7 +138,7 @@ rm -f /etc/wiretide-agent-run /etc/init.d/wiretide /etc/wiretide-token
 # Save controller URL for agent runtime
 echo "\$CONTROLLER_URL" > /etc/wiretide-controller
 
-# Fetch CA certificate (ignore TLS just for this fetch)
+# Fetch CA cert (ignore TLS only for bootstrap)
 CA_PATH="/etc/wiretide-ca.crt"
 wget --no-check-certificate -qO "\$CA_PATH" "\$CONTROLLER_URL/ca.crt" || {
   echo "❌ Failed to download CA cert"
@@ -208,7 +227,7 @@ stop() { kill "$(pgrep -f wiretide-agent-run)" 2>/dev/null; }
 EOF
 chmod +x "$AGENT_DIR/wiretide-init"
 
-### --- NGINX CONFIG (serves full agent dir) ---
+### --- NGINX CONFIG (full agent dir) ---
 cat > /etc/nginx/sites-available/wiretide <<'EOF'
 server {
     listen 443 ssl;
@@ -234,13 +253,11 @@ server {
     listen 80;
     server_name _;
 
-    # Serve full agent directory over HTTP (bootstrap)
     location /static/agent/ {
         alias /opt/wiretide/wiretide/static/agent/;
         autoindex on;
     }
 
-    # Redirect all other HTTP traffic to HTTPS
     location / {
         return 301 https://$host$request_uri;
     }
@@ -248,7 +265,7 @@ server {
 EOF
 ln -sf /etc/nginx/sites-available/wiretide /etc/nginx/sites-enabled/wiretide
 
-# Remove default Nginx site to avoid conflicts
+# Remove default Nginx site
 if [ -L /etc/nginx/sites-enabled/default ] || [ -f /etc/nginx/sites-enabled/default ]; then
     echo "[*] Removing default Nginx site to avoid port 80 conflicts..."
     rm -f /etc/nginx/sites-enabled/default
