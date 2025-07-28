@@ -1,5 +1,8 @@
 #!/bin/sh
 
+# Clear any leftover token
+rm -f /etc/wiretide-token
+
 CONTROLLER_URL="$(cat /etc/wiretide-controller 2>/dev/null || echo 'https://127.0.0.1')"
 CA_CERT="/etc/wiretide-ca.crt"
 TOKEN_FILE="/etc/wiretide-token"
