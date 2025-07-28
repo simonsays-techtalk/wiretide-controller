@@ -5,6 +5,7 @@ from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 import os
 from wiretide.api import roles
+from fastapi.staticfiles import StaticFiles
 
 app = FastAPI()  # <-- Define app FIRST
 
@@ -58,4 +59,7 @@ app.include_router(roles.router)
 async def debug_files():
     import os
     return {"dir": STATIC_DIR, "files": os.listdir(STATIC_DIR)}
+
+
+app.mount("/static", StaticFiles(directory="/opt/wiretide/wiretide/static"), name="static")
 
