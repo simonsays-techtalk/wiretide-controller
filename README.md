@@ -28,8 +28,8 @@ sudo ./install.sh
 ```
 
 ```
-Install on openwrt device
-wget -O - https://<controller-ip>/static/agent/install.sh | sh
+Install wiretide agent on openwrt device
+wget -O - http://192.168.188.61/static/agent/install.sh | sh
 ```
 
 After installation:
