@@ -89,10 +89,10 @@
 
     roles.forEach(role => {
       const wrapper = document.createElement("div");
-      wrapper.className = "p-4 border border-gray-700 bg-gray-900 rounded";
+      wrapper.className = "p-4 border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 rounded";
 
       const title = document.createElement("h4");
-      title.className = "font-semibold mb-2 text-lg";
+      title.className = "font-semibold mb-2 text-lg text-gray-800 dark:text-gray-200";
       title.innerText = `Role: ${role.name}`;
       wrapper.appendChild(title);
 
@@ -102,7 +102,7 @@
 
       permissions.forEach(perm => {
         const label = document.createElement("label");
-        label.className = "block text-sm text-gray-300";
+        label.className = "block text-sm text-gray-700 dark:text-gray-300";
         const checkbox = document.createElement("input");
         checkbox.type = "checkbox";
         checkbox.value = perm;
