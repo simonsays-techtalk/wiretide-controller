@@ -1,5 +1,5 @@
 #!/bin/sh /etc/rc.common
-# Wiretide Agent init.d service
+# Wiretide Agent init.d service (fixed, no orphans)
 
 START=95
 STOP=10
@@ -11,13 +11,19 @@ LOGFILE="/tmp/wiretide-agent.log"
 start() {
     echo "Starting $NAME..."
     mkdir -p /var/run
-    nohup "$PROG" >> "$LOGFILE" 2>&1 &
+    "$PROG" >> "$LOGFILE" 2>&1 &
     echo $! > "$PIDFILE"
 }
 
 stop() {
     echo "Stopping $NAME..."
-    [ -f "$PIDFILE" ] && kill "$(cat "$PIDFILE")" 2>/dev/null && rm -f "$PIDFILE"
+    # Kill PID from file AND any other stray wiretide processes
+    if [ -f "$PIDFILE" ]; then
+        kill "$(cat "$PIDFILE")" 2>/dev/null
+        rm -f "$PIDFILE"
+    fi
+    # Kill all other stray processes
+    ps w | grep wiretide-agent-run | grep -v grep | awk '{print $1}' | xargs kill -9 2>/dev/null
 }
 
 restart() {

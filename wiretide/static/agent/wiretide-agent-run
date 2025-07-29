@@ -1,11 +1,21 @@
 #!/bin/sh
 
+
 # Wiretide Agent (Hybrid + Hostname Debug Logging)
 # - Cross-matches Wi-Fi and ARP clients with /tmp/dhcp.leases
 # - Logs all DHCP MAC→hostname pairs
 # - Logs every client and whether it matched DHCP
 # - Normalizes all MACs (lowercase)
 # - Avoids subshells (CLIENTS builds correctly)
+
+VERSION="Wiretide Agent v2025.07.28"
+
+# Kill any other running copies (self-cleanup)
+for pid in $(ps w | grep '[w]iretide-agent-run' | awk '{print $1}'); do
+    [ "$pid" != "$$" ] && kill -9 "$pid" 2>/dev/null
+done
+
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting $VERSION (PID $$)" >> /tmp/wiretide-debug.log
 
 CONTROLLER_URL="$(cat /etc/wiretide-controller 2>/dev/null || echo 'https://127.0.0.1')"
 CA_CERT="/etc/wiretide-ca.crt"
