@@ -10,6 +10,28 @@ CERT_DIR = "wiretide/certs"
 
 router = APIRouter()
 
+
+def get_process_uptime():
+    """Bepaal de uptime (in seconden) van het huidige Wiretide-proces via /proc."""
+    try:
+        with open("/proc/self/stat") as f:
+            fields = f.read().split()
+            start_ticks = int(fields[21])
+
+        ticks_per_sec = os.sysconf(os.sysconf_names["SC_CLK_TCK"])
+        process_start_time = start_ticks / ticks_per_sec
+
+        with open("/proc/uptime") as f:
+            system_uptime = float(f.readline().split()[0])
+
+        uptime_seconds = system_uptime - process_start_time
+        if uptime_seconds < 0:
+            uptime_seconds = 0
+        return int(uptime_seconds)
+    except Exception:
+        return None
+
+
 @router.get("/api/logs", dependencies=[rbac_required("logs:view")])
 async def get_logs(level: str = "ALL"):
     """Return the last 200 log lines, optionally filtered by level."""
@@ -42,25 +64,31 @@ async def download_logs():
 
 @router.get("/api/system-info", dependencies=[rbac_required("system:view")])
 async def system_info():
-    """Basic controller info (hostname, uptime, version, certs, agent checksum)."""
+    """Return controller diagnostics: hostname, IP, controller uptime, version, certs, agent info."""
     hostname = socket.gethostname()
+
     try:
-        ip = socket.gethostbyname(hostname)
-    except:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+    except Exception:
         ip = "unknown"
 
-    # Uptime (Linux-specific)
-    try:
-        with open("/proc/uptime") as f:
-            seconds = float(f.readline().split()[0])
-            uptime = f"{int(seconds // 3600)}h {int((seconds % 3600) // 60)}m"
-    except:
+    uptime_seconds = get_process_uptime()
+    if uptime_seconds is not None:
+        days = uptime_seconds // 86400
+        hours = (uptime_seconds % 86400) // 3600
+        minutes = (uptime_seconds % 3600) // 60
+        if days > 0:
+            uptime = f"{days}d {hours}h {minutes}m"
+        else:
+            uptime = f"{hours}h {minutes}m"
+    else:
         uptime = "unknown"
 
-    # Version info
-    version = "Wiretide v0.5.0"
+    version = "V0.5.5 Alpha"
 
-    # Certificate details
     cert_path = os.path.join(CERT_DIR, "wiretide-ca.crt")
     if os.path.exists(cert_path):
         try:
@@ -77,13 +105,14 @@ async def system_info():
         expiry = "not found"
         cert_type = "Missing"
 
-    # Agent checksum
-    agent_path = "wiretide/static/wiretide-agent"
-    if os.path.exists(agent_path):
-        with open(agent_path, "rb") as f:
+    agent_zip = "wiretide/static/agent/wiretide-agent.zip"
+    if os.path.exists(agent_zip):
+        with open(agent_zip, "rb") as f:
             checksum = hashlib.sha256(f.read()).hexdigest()
+        agent_url = "/static/agent/wiretide-agent.zip"
     else:
         checksum = "not found"
+        agent_url = None
 
     return JSONResponse({
         "hostname": hostname,
@@ -92,19 +121,20 @@ async def system_info():
         "version": version,
         "cert_type": cert_type,
         "cert_expiry": expiry,
-        "agent_version": "1.0.0",
-        "agent_checksum": checksum
+        "agent_version": "0.5.5 Alpha",
+        "agent_checksum": checksum,
+        "agent_url": agent_url
     })
 
 
 @router.post("/api/restart", dependencies=[rbac_required("system:restart")])
 async def restart_controller():
-    """Restart the Wiretide systemd service."""
+    """Restart the Wiretide systemd service using sudo so NOPASSWD sudoers works."""
     try:
-        subprocess.Popen(["systemctl", "restart", "wiretide.service"])
+        subprocess.Popen(["sudo", "systemctl", "restart", "wiretide.service"])
     except Exception as e:
         print("Restart failed:", e)
-        raise HTTPException(status_code=500, detail="Failed to restart Wiretide.")
+        raise HTTPException(status_code=500, detail=f"Failed to restart Wiretide: {e}")
     return RedirectResponse("/settings", status_code=303)
 
 
@@ -131,8 +161,9 @@ async def regenerate_cert():
 
 
 def delayed_restart():
-    time.sleep(1)  # give API time to respond before restart
+    time.sleep(1)
     subprocess.run(["sudo", "systemctl", "restart", "wiretide.service"], check=False)
+
 
 @router.post("/restart", dependencies=[rbac_required("system:restart")])
 def restart_service():

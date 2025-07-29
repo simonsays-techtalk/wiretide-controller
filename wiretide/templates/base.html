@@ -25,12 +25,46 @@
       <span class="text-blue-600 dark:text-blue-400">Wiretide</span>
     </div>
     <nav class="p-4 space-y-2">
-      <a href="/index.html" class="block px-3 py-2 rounded hover:bg-blue-100 dark:hover:bg-gray-700 text-blue-700 dark:text-white font-medium">Wiretide Devices</a>
-      <a href="/clients" class="block px-3 py-2 rounded hover:bg-blue-100 dark:hover:bg-gray-700 text-gray-700 dark:text-white">Clients</a>
-      <a href="/settings" class="block px-3 py-2 rounded hover:bg-blue-100 dark:hover:bg-gray-700 text-gray-700 dark:text-white">Settings</a>
+      <!-- Wiretide Devices -->
+      <a href="/index.html"
+         class="relative block px-3 py-2 rounded hover:bg-gray-100 dark:hover:bg-gray-700 
+                text-gray-700 dark:text-white
+                {% if request.url.path == '/index.html' %}
+                  bg-gray-200 dark:bg-gray-700 font-semibold
+                {% endif %}">
+        {% if request.url.path == '/index.html' %}
+          <span class="absolute left-0 top-0 bottom-0 w-1 bg-blue-500 rounded-r"></span>
+        {% endif %}
+        Wiretide Devices
+      </a>
+
+      <!-- Clients -->
+      <a href="/clients"
+         class="relative block px-3 py-2 rounded hover:bg-gray-100 dark:hover:bg-gray-700 
+                text-gray-700 dark:text-white
+                {% if request.url.path.startswith('/clients') %}
+                  bg-gray-200 dark:bg-gray-700 font-semibold
+                {% endif %}">
+        {% if request.url.path.startswith('/clients') %}
+          <span class="absolute left-0 top-0 bottom-0 w-1 bg-blue-500 rounded-r"></span>
+        {% endif %}
+        Clients
+      </a>
+
+      <!-- Settings -->
+      <a href="/settings"
+         class="relative block px-3 py-2 rounded hover:bg-gray-100 dark:hover:bg-gray-700 
+                text-gray-700 dark:text-white
+                {% if request.url.path.startswith('/settings') %}
+                  bg-gray-200 dark:bg-gray-700 font-semibold
+                {% endif %}">
+        {% if request.url.path.startswith('/settings') %}
+          <span class="absolute left-0 top-0 bottom-0 w-1 bg-blue-500 rounded-r"></span>
+        {% endif %}
+        Settings
+      </a>
     </nav>
   </aside>
-
 
   <!-- User menu -->
   <div class="absolute top-4 right-6 z-50">
@@ -113,3 +147,4 @@
 {% endblock %}
 </body>
 </html>
+

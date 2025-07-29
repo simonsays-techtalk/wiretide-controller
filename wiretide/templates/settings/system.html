@@ -15,29 +15,47 @@
     </table>
   </div>
 
-  <!-- Certificates -->
+  <!-- Certificates (Under Construction) -->
   <div class="bg-white dark:bg-gray-800 rounded shadow p-4 mb-6">
-    <h3 class="text-lg font-semibold mb-2">Certificates</h3>
-    <p class="text-sm text-gray-500 dark:text-gray-400 mb-2">Currently in use: <span id="cert-type">loading…</span></p>
-    <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">Expires: <span id="cert-expiry">loading…</span></p>
+    <h3 class="text-lg font-semibold mb-2">HTTPS Certificate (Under Construction)</h3>
+    <p class="text-sm text-yellow-500 mb-4">
+      This section currently only manages the self-signed HTTPS certificate for the web interface.
+      Full certificate and SSH key management will be added soon.
+    </p>
+    <p class="text-sm text-gray-500 dark:text-gray-400 mb-2">
+      Currently in use: <span id="cert-type">loading…</span>
+    </p>
+    <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
+      Expires: <span id="cert-expiry">loading…</span>
+    </p>
     <form method="post" action="/api/cert/regenerate" onsubmit="return confirm('Regenerate self-signed certificate?')">
-      <button type="submit" class="bg-yellow-600 text-white px-4 py-2 rounded hover:bg-yellow-700">Regenerate Self-Signed Cert</button>
+      <button type="submit" class="bg-yellow-600 text-white px-4 py-2 rounded hover:bg-yellow-700">
+        Regenerate Self-Signed Cert
+      </button>
     </form>
   </div>
 
   <!-- Agent -->
   <div class="bg-white dark:bg-gray-800 rounded shadow p-4 mb-6">
     <h3 class="text-lg font-semibold mb-2">Wiretide Agent</h3>
-    <p class="text-sm text-gray-500 dark:text-gray-400 mb-1">Latest version: <span id="agent-version">loading…</span></p>
-    <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">SHA256: <span id="agent-checksum">loading…</span></p>
-    <a href="/static/wiretide-agent" class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700">Download Agent</a>
+    <p class="text-sm text-gray-500 dark:text-gray-400 mb-1">
+      Latest version: <span id="agent-version">loading…</span>
+    </p>
+    <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
+      SHA256: <span id="agent-checksum">loading…</span>
+    </p>
+    <a id="agent-download" href="#" class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700">
+      Download Agent (ZIP)
+    </a>
   </div>
 
   <!-- Maintenance -->
   <div class="bg-white dark:bg-gray-800 rounded shadow p-4">
     <h3 class="text-lg font-semibold mb-2">Maintenance</h3>
     <form method="post" action="/api/restart" onsubmit="return confirm('Restart the controller?')">
-      <button type="submit" class="bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700">Restart Controller</button>
+      <button type="submit" class="bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700">
+        Restart Controller
+      </button>
     </form>
   </div>
 </div>
@@ -48,17 +66,32 @@
       const res = await fetch("/api/system-info");
       if (!res.ok) throw new Error("Failed to fetch");
       const data = await res.json();
+
+      // Diagnostics info
       document.getElementById("sys-hostname").textContent = data.hostname;
       document.getElementById("sys-ip").textContent = data.ip;
       document.getElementById("sys-uptime").textContent = data.uptime;
       document.getElementById("sys-version").textContent = data.version;
+
+      // Certificate info
       document.getElementById("cert-type").textContent = data.cert_type;
       document.getElementById("cert-expiry").textContent = data.cert_expiry;
-      document.getElementById("agent-version").textContent = data.agent_version;
-      document.getElementById("agent-checksum").textContent = data.agent_checksum;
+
+      // Agent info
+      document.getElementById("agent-version").textContent = data.agent_version || "unknown";
+      document.getElementById("agent-checksum").textContent = data.agent_checksum || "not found";
+      const downloadLink = document.getElementById("agent-download");
+      if (data.agent_url) {
+        downloadLink.href = data.agent_url;
+        downloadLink.classList.remove("opacity-50", "pointer-events-none");
+      } else {
+        downloadLink.href = "#";
+        downloadLink.classList.add("opacity-50", "pointer-events-none");
+      }
     } catch (err) {
       console.error("System info load error:", err);
     }
   }
   document.addEventListener("DOMContentLoaded", loadSystemInfo);
 </script>
+
