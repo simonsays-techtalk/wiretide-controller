@@ -7,15 +7,60 @@ from wiretide.api.auth import rbac_required
 from wiretide.db import DB_PATH
 from wiretide.tokens import ensure_valid_shared_token
 
-# Absolute paden voor de alpha-setup
 CERTS_DIR = "/etc/wiretide/certs"
-DB_FILE = DB_PATH  # doorgaans /opt/wiretide/wiretide.db
+DB_FILE = DB_PATH  # meestal /opt/wiretide/wiretide.db
+WIRETIDE_DIR = os.path.dirname(DB_FILE)
+SERVICE_USER = "wiretide"
+SERVICE_GROUP = "wiretide"
 
 router = APIRouter()
 
+def fix_permissions():
+    """Herstel standaard permissies voor DB, directories en certs."""
+    try:
+        # Data-directory correct zetten
+        os.chmod(WIRETIDE_DIR, 0o770)
+        shutil.chown(WIRETIDE_DIR, user=SERVICE_USER, group=SERVICE_GROUP)
+
+        # Database eigendom en rechten
+        if os.path.exists(DB_FILE):
+            shutil.chown(DB_FILE, user=SERVICE_USER, group=SERVICE_GROUP)
+            os.chmod(DB_FILE, 0o660)
+
+        # Oude SQLite-journalbestanden verwijderen
+        for f in os.listdir(WIRETIDE_DIR):
+            if f.startswith("wiretide.db-"):
+                os.remove(os.path.join(WIRETIDE_DIR, f))
+
+        # Cert-directory rechten herstellen
+        if os.path.isdir(CERTS_DIR):
+            os.chmod(CERTS_DIR, 0o750)
+            shutil.chown(CERTS_DIR, user="root", group=SERVICE_GROUP)
+            for root, dirs, files in os.walk(CERTS_DIR):
+                for d in dirs:
+                    shutil.chown(os.path.join(root, d), user="root", group=SERVICE_GROUP)
+                    os.chmod(os.path.join(root, d), 0o750)
+                for f in files:
+                    path = os.path.join(root, f)
+                    if f.endswith(".key"):
+                        os.chmod(path, 0o640)
+                        shutil.chown(path, user="root", group=SERVICE_GROUP)
+                    else:
+                        os.chmod(path, 0o644)
+                        shutil.chown(path, user="root", group=SERVICE_GROUP)
+    except Exception as e:
+        print(f"Permission fix failed: {e}")
+
+def restart_service():
+    """Herstart de Wiretide-service zodat nieuwe DB en certs actief zijn."""
+    try:
+        subprocess.run(["systemctl", "restart", "wiretide"], check=True)
+    except Exception as e:
+        print(f"Failed to restart Wiretide service: {e}")
+
 @router.get("/api/backup/download", dependencies=[rbac_required("backup:download")])
 async def download_backup():
-    """Maak een tar.gz backup met de DB en certificaten."""
+    """Maak een tar.gz backup met DB en certificaten."""
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             # Kopieer DB
@@ -39,10 +84,9 @@ async def download_backup():
         print("Backup creation failed:", e)
         raise HTTPException(status_code=500, detail="Failed to create backup")
 
-
 @router.post("/api/backup/restore", dependencies=[rbac_required("backup:restore")])
 async def restore_backup(file: UploadFile):
-    """Herstel database en certificaten uit een tar.gz backup."""
+    """Herstel database en certificaten uit een tar.gz backup, fix permissies, en restart service."""
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".tar.gz") as tmp:
             contents = await file.read()
@@ -69,15 +113,18 @@ async def restore_backup(file: UploadFile):
                     for f in files:
                         shutil.copy2(os.path.join(root, f), dest_root)
 
+        # Herstel rechten en herstart de service
+        fix_permissions()
+        restart_service()
+
         return RedirectResponse("/settings", status_code=303)
     except Exception as e:
         print("Backup restore failed:", e)
         raise HTTPException(status_code=500, detail="Failed to restore backup")
 
-
 @router.post("/api/backup/reset", dependencies=[rbac_required("system:reset")])
 async def factory_reset():
-    """Wist DB en certs, genereert nieuw token en self-signed certs."""
+    """Wist DB en certs, genereert nieuw token, self-signed certs, herstelt permissies en restart service."""
     try:
         # DB verwijderen
         if os.path.exists(DB_FILE):
@@ -95,6 +142,10 @@ async def factory_reset():
             "-days", "365", "-nodes",
             "-subj", "/CN=Wiretide CA"
         ], check=True)
+
+        # Rechten herstellen en service opnieuw starten
+        fix_permissions()
+        restart_service()
 
         return RedirectResponse("/settings", status_code=303)
     except Exception as e:
