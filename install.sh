@@ -2,72 +2,78 @@
 set -e
 
 WIRETIDE_DIR="/opt/wiretide"
-CERT_DIR="/etc/wiretide/certs"
+CONFIG_DIR="/etc/wiretide"
+CERT_DIR="$CONFIG_DIR/certs"
 STATIC_DIR="$WIRETIDE_DIR/wiretide/static"
 AGENT_DIR="$STATIC_DIR/agent"
 DB_FILE="$WIRETIDE_DIR/wiretide.db"
 LOG_FILE="/var/log/wiretide.log"
 REPO_URL="https://github.com/simonsays-techtalk/wiretide-controller.git"
 PYTHON_BIN="/usr/bin/python3"
+SERVICE_USER="wiretide"
+SERVICE_GROUP="wiretide"
+SYSTEMD_SERVICE="/etc/systemd/system/wiretide.service"
 
-echo "[*] Installing Wiretide Controller with SAN-enabled TLS and Agent Bundling..."
+echo "[*] Installing Wiretide Controller (dedicated '$SERVICE_USER' user)..."
 
 apt update && apt install -y nginx python3-venv python3-pip sqlite3 openssl git curl
 
-git config --global --add safe.directory "$WIRETIDE_DIR" || true
-
-# Clone or update repo
-mkdir -p "$WIRETIDE_DIR" "$CERT_DIR"
-if [ ! -d "$WIRETIDE_DIR/.git" ]; then
-    git clone "$REPO_URL" "$WIRETIDE_DIR"
-else
-    cd "$WIRETIDE_DIR"
-    git pull
+# Maak systeemgebruiker als die nog niet bestaat
+if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
+    echo "[*] Creating system user: $SERVICE_USER"
+    useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
 fi
-chown -R www-data:www-data "$WIRETIDE_DIR"
+
+# Voorbereiden directories
+mkdir -p "$WIRETIDE_DIR" "$CERT_DIR" "$STATIC_DIR" "$AGENT_DIR"
+chown -R "$SERVICE_USER":"$SERVICE_GROUP" "$WIRETIDE_DIR"
+chown -R root:"$SERVICE_GROUP" "$CERT_DIR"
+chmod 750 "$CERT_DIR"
 
 cd "$WIRETIDE_DIR"
 
-# Virtual environment
+# Repo ophalen of bijwerken
+if [ ! -d "$WIRETIDE_DIR/.git" ]; then
+    git clone "$REPO_URL" "$WIRETIDE_DIR"
+else
+    git pull
+fi
+
+# Python virtualenv
 if [ ! -d venv ]; then
     $PYTHON_BIN -m venv venv
 fi
-chown -R www-data:www-data "$WIRETIDE_DIR/venv"
+chown -R "$SERVICE_USER":"$SERVICE_GROUP" "$WIRETIDE_DIR/venv"
 source venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
 deactivate
-
-mkdir -p "$STATIC_DIR" "$AGENT_DIR"
-chown -R www-data:www-data "$STATIC_DIR"
 
 # Placeholder logo
 if [ ! -f "$STATIC_DIR/wiretide_logo.png" ]; then
     base64 -d > "$STATIC_DIR/wiretide_logo.png" <<'EOF'
 iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAEklEQVR42mP8z8BQDwADgwHBEdkDTwAAAABJRU5ErkJggg==
 EOF
-    chown www-data:www-data "$STATIC_DIR/wiretide_logo.png"
+    chown "$SERVICE_USER":"$SERVICE_GROUP" "$STATIC_DIR/wiretide_logo.png"
 fi
 
-# Database init
+# Database initialiseren
 if [ ! -f "$DB_FILE" ]; then
     echo "[*] Creating SQLite database..."
     source venv/bin/activate
     python db_init.py
     deactivate
 fi
-DB_DIR=$(dirname "$DB_FILE")
-chown -R www-data:www-data "$DB_FILE" "$DB_DIR"
-chmod -R 775 "$DB_DIR"
-chmod 664 "$DB_FILE"
+chown "$SERVICE_USER":"$SERVICE_GROUP" "$DB_FILE"
+chmod 660 "$DB_FILE"
 
-# Log file
+# Logbestand
 mkdir -p "$(dirname "$LOG_FILE")"
 touch "$LOG_FILE"
-chown www-data:www-data "$LOG_FILE"
-chmod 664 "$LOG_FILE"
+chown "$SERVICE_USER":"$SERVICE_GROUP" "$LOG_FILE"
+chmod 660 "$LOG_FILE"
 
-# API token
+# API token instellen
 API_TOKEN=$(sqlite3 "$DB_FILE" "SELECT token FROM tokens LIMIT 1;" || true)
 if [ -z "$API_TOKEN" ]; then
     API_TOKEN=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 32)
@@ -75,7 +81,7 @@ if [ -z "$API_TOKEN" ]; then
     echo "[*] Generated new API token for /register and /status"
 fi
 
-### --- CA & SAN TLS CERT SETUP ---
+### --- TLS-certificaten ---
 echo "[*] Setting up CA and SAN-enabled TLS cert..."
 IP=$(hostname -I | awk '{print $1}')
 if [ ! -f "$CERT_DIR/wiretide-ca.crt" ]; then
@@ -84,7 +90,6 @@ if [ ! -f "$CERT_DIR/wiretide-ca.crt" ]; then
       -subj "/CN=Wiretide Root CA" -out "$CERT_DIR/wiretide-ca.crt"
 fi
 
-# Create OpenSSL config for SAN
 cat > "$CERT_DIR/openssl-san.cnf" <<EOF
 [req]
 default_bits = 4096
@@ -103,22 +108,22 @@ DNS.1 = wiretide
 IP.1 = $IP
 EOF
 
-# Generate SAN-enabled cert
 openssl genrsa -out "$CERT_DIR/wiretide.key" 4096
 openssl req -new -key "$CERT_DIR/wiretide.key" -out "$CERT_DIR/wiretide.csr" -config "$CERT_DIR/openssl-san.cnf"
 openssl x509 -req -in "$CERT_DIR/wiretide.csr" -CA "$CERT_DIR/wiretide-ca.crt" -CAkey "$CERT_DIR/wiretide-ca.key" \
   -CAcreateserial -out "$CERT_DIR/wiretide.crt" -days 825 -sha256 -extensions v3_req -extfile "$CERT_DIR/openssl-san.cnf"
 
-# Fix permissions for Nginx
-chown root:www-data "$CERT_DIR/wiretide.key" "$CERT_DIR/wiretide.crt"
-chmod 640 "$CERT_DIR/wiretide.key"
-chmod 644 "$CERT_DIR/wiretide.crt"
+# Rechten voor certs (service-user mag lezen, Nginx ook)
+chown root:"$SERVICE_GROUP" "$CERT_DIR"/*.key "$CERT_DIR"/*.crt
+chmod 640 "$CERT_DIR"/*.key
+chmod 644 "$CERT_DIR"/*.crt
 
-# Make CA cert available to agents
+# CA-cert publiek maken voor agents
 cp "$CERT_DIR/wiretide-ca.crt" "$STATIC_DIR/ca.crt"
-chown www-data:www-data "$STATIC_DIR/ca.crt"
+chown "$SERVICE_USER":"$SERVICE_GROUP" "$STATIC_DIR/ca.crt"
 
-### --- AGENT PACKAGE (with baked IP) ---
+### --- Agent bundling ---
+DEBUG_LOG="/tmp/wiretide-debug.log"
 cat > "$AGENT_DIR/install.sh" <<EOF
 #!/bin/sh
 set -e
@@ -127,7 +132,7 @@ echo ">>> Wiretide Agent Installer"
 CONTROLLER_URL="https://$IP"
 echo ">> Using controller: \$CONTROLLER_URL"
 
-# Stop and remove old agent (safe re-install)
+# Stop oude agent
 if [ -f /etc/init.d/wiretide ]; then
     /etc/init.d/wiretide stop 2>/dev/null || true
     /etc/init.d/wiretide disable 2>/dev/null || true
@@ -135,10 +140,10 @@ fi
 killall -q wiretide-agent-run 2>/dev/null || true
 rm -f /etc/wiretide-agent-run /etc/init.d/wiretide /etc/wiretide-token
 
-# Save controller URL for agent runtime
+# Save controller URL
 echo "\$CONTROLLER_URL" > /etc/wiretide-controller
 
-# Fetch CA cert (ignore TLS only for bootstrap)
+# Fetch CA cert
 CA_PATH="/etc/wiretide-ca.crt"
 wget --no-check-certificate -qO "\$CA_PATH" "\$CONTROLLER_URL/ca.crt" || {
   echo "❌ Failed to download CA cert"
@@ -148,25 +153,24 @@ chmod 644 "\$CA_PATH"
 mkdir -p /etc/ssl/certs
 cp "\$CA_PATH" /etc/ssl/certs/
 
-# Download agent runtime + init scripts
+# Download agent runtime + init script
 wget --no-check-certificate -qO /etc/wiretide-agent-run "\$CONTROLLER_URL/static/agent/wiretide-agent-run"
 chmod +x /etc/wiretide-agent-run
 
 wget --no-check-certificate -qO /etc/init.d/wiretide "\$CONTROLLER_URL/static/agent/wiretide-init"
 chmod +x /etc/init.d/wiretide
 
-# Enable and start agent
+# Enable en start agent
 /etc/init.d/wiretide enable
 /etc/init.d/wiretide start
 
-echo "✅ Wiretide Agent installed and running (Controller: \$CONTROLLER_URL)"
+echo "✅ Wiretide Agent installed (Controller: \$CONTROLLER_URL)"
 EOF
 chmod +x "$AGENT_DIR/install.sh"
 
 # Agent runtime script
 cat > "$AGENT_DIR/wiretide-agent-run" <<'EOF'
 #!/bin/sh
-
 CONTROLLER_URL="$(cat /etc/wiretide-controller 2>/dev/null || echo 'https://127.0.0.1')"
 CA_CERT="/etc/wiretide-ca.crt"
 TOKEN_FILE="/etc/wiretide-token"
@@ -218,7 +222,7 @@ done
 EOF
 chmod +x "$AGENT_DIR/wiretide-agent-run"
 
-# Init script
+# Agent init script
 cat > "$AGENT_DIR/wiretide-init" <<'EOF'
 #!/bin/sh /etc/rc.common
 START=99
@@ -227,7 +231,7 @@ stop() { kill "$(pgrep -f wiretide-agent-run)" 2>/dev/null; }
 EOF
 chmod +x "$AGENT_DIR/wiretide-init"
 
-### --- NGINX CONFIG (full agent dir) ---
+### --- Nginx configuratie ---
 cat > /etc/nginx/sites-available/wiretide <<'EOF'
 server {
     listen 443 ssl;
@@ -264,42 +268,41 @@ server {
 }
 EOF
 ln -sf /etc/nginx/sites-available/wiretide /etc/nginx/sites-enabled/wiretide
-
-# Remove default Nginx site
-if [ -L /etc/nginx/sites-enabled/default ] || [ -f /etc/nginx/sites-enabled/default ]; then
-    echo "[*] Removing default Nginx site to avoid port 80 conflicts..."
-    rm -f /etc/nginx/sites-enabled/default
-fi
-
+rm -f /etc/nginx/sites-enabled/default
 systemctl restart nginx
 
-# Systemd + permissions
-cp wiretide.service /etc/systemd/system/wiretide.service
-systemctl daemon-reload
-systemctl enable --now wiretide.service
+### --- Systemd service voor Wiretide ---
+cat > "$SYSTEMD_SERVICE" <<EOF
+[Unit]
+Description=Wiretide Controller
+After=network.target
 
-sudo bash -c 'cat >/etc/sudoers.d/wiretide' <<'EOF'
-www-data ALL=(ALL) NOPASSWD: /bin/systemctl restart wiretide.service
+[Service]
+User=$SERVICE_USER
+Group=$SERVICE_GROUP
+WorkingDirectory=$WIRETIDE_DIR
+ExecStart=/usr/bin/env uvicorn wiretide.main:app --host 127.0.0.1 --port 8000
+Restart=always
+Environment="PATH=$WIRETIDE_DIR/venv/bin"
+StandardOutput=append:$LOG_FILE
+StandardError=append:$LOG_FILE
+
+[Install]
+WantedBy=multi-user.target
 EOF
-chmod 440 /etc/sudoers.d/wiretide
 
-sleep 3
-if ! curl -sk https://127.0.0.1/ > /dev/null; then
-    echo "[!] Wiretide may not be running. Logs:"
-    journalctl -u wiretide --no-pager -n 50
-else
-    echo "[*] Wiretide is up and reachable locally."
-fi
+systemctl daemon-reload
+systemctl enable --now wiretide
 
 echo "==========================================="
-echo " Wiretide Controller Installed Successfully"
+echo " Wiretide Controller Installed"
 echo "-------------------------------------------"
+echo "Running as user: $SERVICE_USER"
 echo "Access:   https://$IP/"
 echo "Username: admin"
 echo "Password: wiretide"
 echo "API Token (for agents): $API_TOKEN"
 echo "CA Download: https://$IP/ca.crt"
-echo "Agent Installer (HTTP): http://$IP/static/agent/install.sh"
-echo "Full Agent Directory (HTTP): http://$IP/static/agent/"
+echo "Agent Installer: http://$IP/static/agent/install.sh"
 echo "==========================================="
 
