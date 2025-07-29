@@ -1,10 +1,11 @@
 #!/bin/sh
 
-# Wiretide Agent (final fixed version)
-# - Valid JSON client list (no trailing commas, skips bad MACs)
-# - Only uses X-API-Token (no duplicate headers)
-# - Auto-refetches token if invalid (403)
-# - Logs for debugging
+# Wiretide Agent (Hybrid + Hostname Debug Logging)
+# - Cross-matches Wi-Fi and ARP clients with /tmp/dhcp.leases
+# - Logs all DHCP MAC→hostname pairs
+# - Logs every client and whether it matched DHCP
+# - Normalizes all MACs (lowercase)
+# - Avoids subshells (CLIENTS builds correctly)
 
 CONTROLLER_URL="$(cat /etc/wiretide-controller 2>/dev/null || echo 'https://127.0.0.1')"
 CA_CERT="/etc/wiretide-ca.crt"
@@ -13,18 +14,18 @@ INTERVAL=60
 POLL_DELAY=10
 DEBUG_LOG="/tmp/wiretide-debug.log"
 PAYLOAD_FILE="/tmp/wiretide-last-payload.json"
+DHCP_DEBUG="/tmp/wiretide-hostname-debug.txt"
 
-# Determine primary interface + MAC
+# Primary interface + MAC
 IFACE=""
 [ -d /sys/class/net/br-lan ] && IFACE="br-lan"
 [ -z "$IFACE" ] && IFACE="$(ip route | awk '/default/ {print $5}' | head -n1)"
 [ -z "$IFACE" ] && IFACE="$(ip -o link show | awk -F': ' '/state UP/ && $2!="lo"{print $2;exit}')"
-MAC="$(ip link show "$IFACE" 2>/dev/null | awk '/ether/ {print $2}')"
+MAC="$(ip link show "$IFACE" 2>/dev/null | awk '/ether/ {print tolower($2)}')"
 DEVICE_IP="$(ip -4 addr show "$IFACE" 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1)"
 MODEL="$(cat /tmp/sysinfo/model 2>/dev/null)"
 FPR="$(dropbearkey -y -f /etc/dropbear/dropbear_rsa_host_key 2>/dev/null | awk -F': ' '/Fingerprint/ {print $2}')"
 
-# Resolve hostname (fallback to MAC)
 HOSTNAME="$(uci get system.@system[0].hostname 2>/dev/null || hostname 2>/dev/null)"
 [ -z "$HOSTNAME" ] && HOSTNAME="$MAC"
 
@@ -32,11 +33,30 @@ log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$DEBUG_LOG"
 }
 
+normalize_mac() {
+  echo "$1" | tr 'A-F' 'a-f'
+}
+
+# Lookup DHCP entry (returns "IP,Hostname" or empty)
+lookup_dhcp() {
+  mac="$(normalize_mac "$1")"
+  awk -v mac="$mac" 'tolower($2)==mac {hn=$4; if(hn=="*"||hn=="")hn="unknown"; print $3","hn; exit}' /tmp/dhcp.leases 2>/dev/null
+}
+
+find_interface() {
+  mac="$(normalize_mac "$1")"
+  for ifc in $(iw dev 2>/dev/null | awk '/Interface/{print $2}'); do
+    iw dev "$ifc" station dump 2>/dev/null | grep -qi "$mac" && { echo "$ifc"; return; }
+  done
+  brctl showmacs br-lan 2>/dev/null | awk -v mac="$mac" '{print tolower($1)}' | grep -q "$mac" && { echo "br-lan"; return; }
+  echo "unknown"
+}
+
 build_payload() {
   SSH_ENABLED=false
   pgrep dropbear >/dev/null && [ -s /etc/dropbear/dropbear_rsa_host_key ] && SSH_ENABLED=true
 
-  # Collect DNS servers
+  # DNS servers
   DNS_RAW="$(uci get dhcp.@dnsmasq[0].server 2>/dev/null || grep '^nameserver' /tmp/resolv.conf | awk '{print $2}')"
   DNS_LIST=""
   for ip in $DNS_RAW; do
@@ -44,50 +64,66 @@ build_payload() {
     [ -n "$DNS_LIST" ] && DNS_LIST="$DNS_LIST, \"$ip\"" || DNS_LIST="\"$ip\""
   done
 
-  # Firewall + NTP
   /etc/init.d/firewall enabled && /etc/init.d/firewall status >/dev/null && FIREWALL=true || FIREWALL=false
   NTP="$(uci get system.ntp.enabled 2>/dev/null || echo false)"
 
   CLIENTS=""
   SEEN="/tmp/wt-seen-macs"; > "$SEEN"
 
+  # Dump all DHCP leases (for debugging)
+  awk '{printf "DHCP: MAC=%s HOST=%s\n", tolower($2), $4}' /tmp/dhcp.leases > "$DHCP_DEBUG"
+
   add_client() {
-    # Validate MAC address format
-    echo "$1" | grep -Eq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' || return
+    mac="$(normalize_mac "$1")"; ip="$2"; hn="$3"; ifc="$4"; via="$5"
+    echo "$mac" | grep -Eq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' || return
     [ -n "$CLIENTS" ] && CLIENTS="$CLIENTS,"
-    CLIENTS="$CLIENTS{ \"mac\":\"$1\",\"ip\":\"$2\",\"hostname\":\"$3\",\"interface\":\"$4\",\"connected_via\":\"$5\",\"rx_bytes\":0,\"tx_bytes\":0 }"
+    CLIENTS="$CLIENTS{ \"mac\":\"$mac\",\"ip\":\"$ip\",\"hostname\":\"$hn\",\"interface\":\"$ifc\",\"connected_via\":\"$via\",\"rx_bytes\":0,\"tx_bytes\":0 }"
+    if [ "$hn" != "unknown" ]; then
+      log "Added client (DHCP hostname): MAC=$mac IP=$ip Hostname=$hn IF=$ifc Via=$via"
+    else
+      log "Added client (no hostname): MAC=$mac IP=$ip Hostname=unknown IF=$ifc Via=$via"
+    fi
   }
 
-  # Wi-Fi stations
-  iw dev 2>/dev/null | awk '/Interface/{print $2}' > /tmp/wt-if
-  while read -r ifc; do
-    iw dev "$ifc" station dump | awk '/Station/{print $2}' | tr 'A-Z' 'a-z' > /tmp/wt-wifi
-    while read -r sta; do
+  # Wi-Fi stations (cross-match with DHCP)
+  for ifc in $(iw dev 2>/dev/null | awk '/Interface/{print $2}'); do
+    for sta in $(iw dev "$ifc" station dump | awk '/Station/{print $2}' | tr 'A-Z' 'a-z'); do
       echo "$sta" >> "$SEEN"
-      add_client "$sta" "unknown" "unknown" "$ifc" "wifi"
-    done < /tmp/wt-wifi
-  done < /tmp/wt-if
-  rm -f /tmp/wt-if /tmp/wt-wifi
-
-  # DHCP leases
-  [ -f /tmp/dhcp.leases ] && awk '{print tolower($2)","$3","$4}' /tmp/dhcp.leases | \
-  while IFS=, read -r cm cip ch; do
-    echo "$cip" | grep -q '^fe80::' && continue
-    grep -q "$cm" "$SEEN" && continue
-    echo "$cm" >> "$SEEN"
-    [ -z "$ch" ] && ch="unknown"
-    add_client "$cm" "$cip" "$ch" "unknown" "ethernet"
+      entry="$(lookup_dhcp "$sta")"
+      ip="unknown"; hn="unknown"
+      [ -n "$entry" ] && { ip="$(echo "$entry" | cut -d, -f1)"; hn="$(echo "$entry" | cut -d, -f2)"; }
+      add_client "$sta" "$ip" "$hn" "$ifc" "wifi"
+    done
   done
 
-  # ARP neighbors
-  ip neigh show | awk '{print tolower($1)","tolower($5)}' > /tmp/wt-arp
-  while IFS=, read -r ip mac; do
+  # DHCP leases (Ethernet, direct)
+  if [ -f /tmp/dhcp.leases ]; then
+    while read -r exp mac ip hostname cid; do
+      cm="$(normalize_mac "$mac")"
+      grep -q "$cm" "$SEEN" && continue
+      echo "$cm" >> "$SEEN"
+      [ "$hostname" = "*" ] || [ -z "$hostname" ] && hostname="unknown"
+      ifc="$(find_interface "$cm")"
+      add_client "$cm" "$ip" "$hostname" "$ifc" "ethernet"
+    done < /tmp/dhcp.leases
+  fi
+
+  # ARP neighbors (cross-match with DHCP)
+  while read -r ip dev ll mac rest; do
+    cm="$(normalize_mac "$mac")"
     echo "$ip" | grep -q '^fe80::' && continue
-    grep -q "$mac" "$SEEN" && continue
-    echo "$mac" >> "$SEEN"
-    add_client "$mac" "$ip" "unknown" "unknown" "ethernet"
-  done < /tmp/wt-arp
-  rm -f /tmp/wt-arp "$SEEN"
+    grep -q "$cm" "$SEEN" && continue
+    echo "$cm" >> "$SEEN"
+    entry="$(lookup_dhcp "$cm")"
+    hn="unknown"
+    [ -n "$entry" ] && hn="$(echo "$entry" | cut -d, -f2)"
+    ifc="$(find_interface "$cm")"
+    add_client "$cm" "$ip" "$hn" "$ifc" "ethernet"
+  done <<EOF
+$(ip neigh show)
+EOF
+
+  rm -f "$SEEN"
 
   SETTINGS=$(cat <<EOF
 { "model":"$MODEL","wan_ip":"$DEVICE_IP","dns":[ $DNS_LIST ],"firewall":$FIREWALL,"ntp":$NTP }
@@ -158,20 +194,16 @@ send_status() {
 
 log "Starting Wiretide agent (Controller: $CONTROLLER_URL, MAC: $MAC)"
 
-# Register device
 register_device
 
-# Fetch token until approved
 while [ ! -f "$TOKEN_FILE" ]; do
   fetch_token
   [ -f "$TOKEN_FILE" ] || sleep "$POLL_DELAY"
 done
 
-# Main loop
 while true; do
   send_status
   if [ ! -f "$TOKEN_FILE" ]; then
-    # Refetch token if cleared due to 403
     while [ ! -f "$TOKEN_FILE" ]; do
       fetch_token
       [ -f "$TOKEN_FILE" ] || sleep "$POLL_DELAY"
