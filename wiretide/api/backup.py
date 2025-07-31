@@ -1,11 +1,16 @@
-# wiretide/api/backup.py
+import os
+import tarfile
+import tempfile
+import subprocess
+import shutil
+
 from fastapi import APIRouter, UploadFile, Depends, HTTPException
 from fastapi.responses import FileResponse, RedirectResponse
-import os, tarfile, tempfile, subprocess, shutil
 
 from wiretide.api.auth import rbac_required
 from wiretide.db import DB_PATH
 from wiretide.tokens import ensure_valid_shared_token
+
 
 CERTS_DIR = "/etc/wiretide/certs"
 DB_FILE = DB_PATH  # meestal /opt/wiretide/wiretide.db
@@ -84,6 +89,18 @@ async def download_backup():
         print("Backup creation failed:", e)
         raise HTTPException(status_code=500, detail="Failed to create backup")
 
+def is_within_directory(directory, target):
+    abs_directory = os.path.abspath(directory)
+    abs_target = os.path.abspath(target)
+    return os.path.commonpath([abs_directory]) == os.path.commonpath([abs_directory, abs_target])
+
+def safe_extract(tar: tarfile.TarFile, path: str = "."):
+    for member in tar.getmembers():
+        member_path = os.path.join(path, member.name)
+        if not is_within_directory(path, member_path):
+            raise Exception(f"Unsafe path detected in archive: {member.name}")
+    tar.extractall(path)
+
 @router.post("/api/backup/restore", dependencies=[rbac_required("backup:restore")])
 async def restore_backup(file: UploadFile):
     """Herstel database en certificaten uit een tar.gz backup, fix permissies, en restart service."""
@@ -95,7 +112,7 @@ async def restore_backup(file: UploadFile):
 
         with tarfile.open(tmp_path, "r:gz") as tar:
             temp_extract = tempfile.mkdtemp()
-            tar.extractall(temp_extract)
+            safe_extract(tar, temp_extract)
 
             # Database herstellen
             db_src = os.path.join(temp_extract, "wiretide.db")
@@ -113,7 +130,6 @@ async def restore_backup(file: UploadFile):
                     for f in files:
                         shutil.copy2(os.path.join(root, f), dest_root)
 
-        # Herstel rechten en herstart de service
         fix_permissions()
         restart_service()
 

@@ -1,7 +1,7 @@
-# wiretide/api/settings.py
 from fastapi import APIRouter, Request, Form, Depends
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
+from wiretide.timeutil import format_local
 import aiosqlite
 from datetime import timedelta
 
@@ -10,6 +10,7 @@ from wiretide.tokens import ensure_valid_shared_token, update_token
 from wiretide.db import DB_PATH
 
 templates = Jinja2Templates(directory="wiretide/templates")
+templates.env.filters["localtime"] = format_local
 router = APIRouter()
 
 @router.get("/settings", dependencies=[Depends(require_login)])
