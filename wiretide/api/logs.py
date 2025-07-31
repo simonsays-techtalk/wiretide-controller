@@ -28,7 +28,7 @@ async def get_logs(level: str = "ALL"):
 
     # Filter by level if needed
     if level != "ALL":
-        regex = re.compile(rf"\b{level}\b")
+        regex = re.compile(rf"\b{re.escape(level)}\b")
         lines = [line for line in lines if regex.search(line)]
     return {"lines": lines}
 
