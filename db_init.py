@@ -147,10 +147,6 @@ if cursor.fetchone()[0] == 0:
     )
     print("Default admin user created: username=admin, password=wiretide")
 
-conn.commit()
-conn.close()
-print(f"Database initialized at {DB_PATH}")
-
 # --- Seed default agent update config ---
 cursor.execute("""
 INSERT OR IGNORE INTO config (key, value) VALUES
@@ -164,5 +160,10 @@ cursor.execute("""
 INSERT OR IGNORE INTO config (key, value) VALUES
 ('min_supported_agent_version', '0.1.0')
 """)
+
+conn.commit()
+conn.close()
+print(f"Database initialized at {DB_PATH}")
+
 
 
