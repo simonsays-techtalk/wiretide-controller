@@ -50,6 +50,19 @@ wget -O - http://<server-ip>/static/agent/install.sh | sh
 
 ---
 
+## 🔒 Security Status
+
+Wiretide is built with a strong focus on security. We use the following tools to proactively detect vulnerabilities:
+
+- [`Bandit`](https://github.com/PyCQA/bandit): static analysis of Python code  
+- [`Semgrep`](https://semgrep.dev): contextual detection of common security issues
+
+All commits to `main` are tested with these tools.  
+Critical components such as password hashing (bcrypt), RBAC, and file access controls have been reviewed for security.  
+Communication between the agent and controller is secured using HTTPS and a pre-shared token.
+
+---
+
 ## 🛣️ Roadmap
 
 - Finalize and stabilize the Wiretide Agent for OpenWRT
