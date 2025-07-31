@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 import os
 from wiretide.api import roles
 from fastapi.responses import FileResponse
+from wiretide.timeutil import format_local
 
 app = FastAPI()  # <-- Define app FIRST
 
@@ -58,4 +59,10 @@ app.include_router(roles.router)
 async def get_ca():
     ca_path = os.path.join(STATIC_DIR, "ca.crt")
     return FileResponse(ca_path)
+
+
+# Time helper
+from fastapi.templating import Jinja2Templates
+templates = Jinja2Templates(directory="wiretide/templates")
+templates.env.filters["localtime"] = format_local
 

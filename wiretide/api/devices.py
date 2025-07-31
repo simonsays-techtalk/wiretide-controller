@@ -1,10 +1,11 @@
 from fastapi import APIRouter, Request, HTTPException, Form, Depends
 from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel
-from datetime import datetime
-import aiosqlite
+from wiretide.timeutil import format_local
 import json
 import enum
+import aiosqlite
+from datetime import datetime
 from wiretide.tokens import get_shared_token
 from wiretide.db import DB_PATH
 from wiretide.api.auth import require_login, require_api_token
@@ -41,7 +42,7 @@ async def register_device(device: DeviceRegistration, request: Request):
             new_status = 'waiting' if current_status == 'removed' else current_status
             await db.execute(
                 "UPDATE devices SET hostname = ?, ip = ?, last_seen = ?, status = ? WHERE id = ?",
-                (device.hostname, ip, datetime.utcnow(), new_status, device_id)
+                (device.hostname, ip, datetime.now(), new_status, device_id)
             )
         else:
             await db.execute(
@@ -55,7 +56,7 @@ async def register_device(device: DeviceRegistration, request: Request):
 @router.post("/status")
 async def device_status(status: DeviceStatus, request: Request, _: str = Depends(require_api_token)):
     client_ip = request.client.host
-    now = datetime.utcnow().isoformat()
+    now = datetime.now()
     mac_lower = status.mac.lower()
 
     async with aiosqlite.connect(DB_PATH) as db:
@@ -115,7 +116,7 @@ async def list_devices(_: str = Depends(require_login)):
             "hostname": row[0],
             "mac": row[1],
             "ip": row[2],
-            "last_seen": row[3],
+            "last_seen": format_local(row[3]),
             "status": row[4],
             "ssh_enabled": bool(row[5]),
             "device_type": row[6],
@@ -212,7 +213,7 @@ async def queue_config(mac: str = Form(...), config_json: str = Form(...), _: st
             INSERT INTO device_configs (mac, config, created_at)
             VALUES (?, ?, ?)
             ON CONFLICT(mac) DO UPDATE SET config=excluded.config, created_at=excluded.created_at
-        """, (mac, json.dumps(parsed), datetime.utcnow().isoformat()))
+        """, (mac, json.dumps(parsed), datetime.now()))
         await db.commit()
     return {"status": "queued"}
 
