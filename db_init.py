@@ -109,6 +109,11 @@ cursor.execute("""
 INSERT OR IGNORE INTO role_permissions (role_id, permission)
 SELECT id, '*' FROM roles WHERE name='admin'
 """)
+cursor.execute("""
+INSERT OR IGNORE INTO role_permissions (role_id, permission)
+SELECT id, 'system:edit' FROM roles WHERE name='admin'
+""")
+
 
 # User: read-only (view only)
 for perm in ['devices:view', 'status:view']:

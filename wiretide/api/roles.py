@@ -34,6 +34,7 @@ async def list_permissions():
         "cert:regenerate",
         "logs:view", "logs:download",
         "devices:view", "devices:approve", "devices:manage",
+        "system:view", "system:edit", "system:restart",
         "backup:download", "backup:restore", "system:reset",
         "users:create", "users:delete",
         "token:regenerate"
