@@ -1,25 +1,26 @@
-# Wiretide Controller.
+# Wiretide Controller
 
 **Wiretide** is a lightweight controller for managing **OpenWRT devices** via a central server.  
-It provides a simple web interface, API, and agent integration for device registration, monitoring, and management.
+It provides a simple web interface, REST API, and agent integration for registration, monitoring, and remote management.
 
-> **Status:** ALPHA — Expect bugs and breaking changes.  
-> The agent is still under development and needs testing.
-
----
-
-## Features
-- Centralized management for OpenWRT devices.
-- Web UI with login and device dashboard.
-- Auto-registration and heartbeat endpoints for agents.
-- HTTPS enabled by default (self-signed certificate).
-- SQLite-based backend with easy setup.
+> **Status:** ⚠️ ALPHA — Expect bugs and breaking changes.  
+> The Wiretide agent is still under development and requires further testing.
 
 ---
 
-## Installation (Ubuntu 24.04 or newer)
+## ✨ Features
 
-Run the following commands on your server:
+- Centralized management for OpenWRT devices
+- Web-based UI with login and device overview
+- Agent registration and status (heartbeat) endpoints
+- HTTPS enabled by default (with self-signed certificate)
+- Simple SQLite backend — no external DB required
+
+---
+
+## 🚀 Installation (Ubuntu 24.04 or newer)
+
+### Install the controller on your server:
 
 ```bash
 wget https://raw.githubusercontent.com/simonsays-techtalk/wiretide-controller/main/install.sh -O install.sh
@@ -27,40 +28,32 @@ chmod +x install.sh
 sudo ./install.sh
 ```
 
+### Install the Wiretide agent on an OpenWRT device:
+
+```bash
+wget -O - http://<server-ip>/static/agent/install.sh | sh
 ```
-Install wiretide agent on openwrt device
-wget -O - http://<server-ip>static/agent/install.sh | sh
-```
 
-After installation:
+### After installation:
 
-    Access the controller via your browser: https://<server-ip>/
+- Visit the controller: `https://<server-ip>/`
+- Default login:
+  - **Username:** `admin`
+  - **Password:** `wiretide`
+- A **pre-shared API token** (for agent registration) will be shown at the end of the install process.
 
-    Default credentials:
+---
 
-    Username: admin
-    Password: wiretide
+## 🔐 Notes
 
-    An API token (for agents) will be generated and displayed at the end of the install.
+- A self-signed TLS certificate is used by default. Your browser will show a warning.
 
-Notes
+---
 
-    The included self-signed TLS certificate will trigger browser warnings.
-    For testing, curl commands can use -k to skip certificate checks:
+## 🛣️ Roadmap
 
-curl -k https://server.ip/api/status
+- Finalize and stabilize the Wiretide Agent for OpenWRT
+- Add audit logging and configurable device actions
+- Improve Web UI with more device details
+- Support upgrades, backups, and uninstall
 
-All assets (logo, agent download files) are served from /static/.
-Place any custom branding or agent packages in:
-
-    /opt/wiretide/wiretide/static/
-
-Roadmap
-
-    Finalize and test the Wiretide Agent for OpenWRT.
-
-    Add audit logging and advanced device configuration.
-
-    Web UI improvements and more device metrics.
-
-    Support for easy upgrades and uninstall.
