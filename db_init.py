@@ -21,9 +21,12 @@ CREATE TABLE IF NOT EXISTS devices (
     last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     device_type TEXT DEFAULT 'unknown',
     approved INTEGER DEFAULT 0,
-    status_json TEXT
+    status_json TEXT,
+    agent_update_allowed BOOLEAN DEFAULT 0,
+    agent_version TEXT DEFAULT '0.1.0'
 );
 """)
+
 
 # --- Device status table ---
 cursor.execute("""
@@ -147,4 +150,19 @@ if cursor.fetchone()[0] == 0:
 conn.commit()
 conn.close()
 print(f"Database initialized at {DB_PATH}")
+
+# --- Seed default agent update config ---
+cursor.execute("""
+INSERT OR IGNORE INTO config (key, value) VALUES
+('agent_updates_enabled', 'false')
+""")
+cursor.execute("""
+INSERT OR IGNORE INTO config (key, value) VALUES
+('agent_update_url', '/static/agent/agent-update-v0.5.5.sh')
+""")
+cursor.execute("""
+INSERT OR IGNORE INTO config (key, value) VALUES
+('min_supported_agent_version', '0.1.0')
+""")
+
 
