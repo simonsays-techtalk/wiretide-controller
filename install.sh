@@ -18,13 +18,11 @@ echo "[*] Installing Wiretide Controller (dedicated '$SERVICE_USER' user, clean 
 
 apt update && apt install -y nginx python3-venv python3-pip sqlite3 openssl git curl
 
-# create service user
 if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
     echo "[*] Creating system user: $SERVICE_USER"
     useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
 fi
 
-# Clean install
 if [ -d "$WIRETIDE_DIR" ]; then
     echo "[*] Removing existing installation at $WIRETIDE_DIR"
     rm -rf "$WIRETIDE_DIR"
@@ -32,7 +30,6 @@ fi
 
 git clone "$REPO_URL" "$WIRETIDE_DIR"
 
-# set directories and access
 mkdir -p "$CERT_DIR" "$STATIC_DIR" "$AGENT_DIR"
 chown -R "$SERVICE_USER:$SERVICE_GROUP" "$WIRETIDE_DIR"
 chmod 770 "$WIRETIDE_DIR"
@@ -41,7 +38,6 @@ chmod 750 "$CERT_DIR"
 
 cd "$WIRETIDE_DIR"
 
-# Python virtualenv
 if [ ! -d venv ]; then
     $PYTHON_BIN -m venv venv
 fi
@@ -51,7 +47,6 @@ pip install --upgrade pip
 pip install -r requirements.txt
 deactivate
 
-# Placeholder logo
 if [ ! -f "$STATIC_DIR/wiretide_logo.png" ]; then
     base64 -d > "$STATIC_DIR/wiretide_logo.png" <<'EOF'
 iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAEklEQVR42mP8z8BQDwADgwHBEdkDTwAAAABJRU5ErkJggg==
@@ -59,7 +54,6 @@ EOF
     chown "$SERVICE_USER:$SERVICE_GROUP" "$STATIC_DIR/wiretide_logo.png"
 fi
 
-# Init DB
 if [ ! -f "$DB_FILE" ]; then
     echo "[*] Creating SQLite database..."
     source venv/bin/activate
@@ -71,13 +65,11 @@ chmod 660 "$DB_FILE"
 chown "$SERVICE_USER:$SERVICE_GROUP" "$DB_FILE"
 chmod 770 "$WIRETIDE_DIR"
 
-# Logfile
 mkdir -p "$(dirname "$LOG_FILE")"
 touch "$LOG_FILE"
 chown "$SERVICE_USER:$SERVICE_GROUP" "$LOG_FILE"
 chmod 660 "$LOG_FILE"
 
-# Create initial API token
 API_TOKEN=$(sqlite3 "$DB_FILE" "SELECT token FROM tokens LIMIT 1;" || true)
 if [ -z "$API_TOKEN" ]; then
     API_TOKEN=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 32)
@@ -85,7 +77,6 @@ if [ -z "$API_TOKEN" ]; then
     echo "[*] Generated new API token for /register and /status"
 fi
 
-### --- TLS-certificates ---
 echo "[*] Setting up CA and SAN-enabled TLS cert..."
 IP=$(hostname -I | awk '{print $1}')
 if [ ! -f "$CERT_DIR/wiretide-ca.crt" ]; then
@@ -117,16 +108,84 @@ openssl req -new -key "$CERT_DIR/wiretide.key" -out "$CERT_DIR/wiretide.csr" -co
 openssl x509 -req -in "$CERT_DIR/wiretide.csr" -CA "$CERT_DIR/wiretide-ca.crt" -CAkey "$CERT_DIR/wiretide-ca.key" \
   -CAcreateserial -out "$CERT_DIR/wiretide.crt" -days 825 -sha256 -extensions v3_req -extfile "$CERT_DIR/openssl-san.cnf"
 
-# Cert permissions
 chown "$SERVICE_USER:$SERVICE_GROUP" "$CERT_DIR"/*.key "$CERT_DIR"/*.crt
 chmod 640 "$CERT_DIR"/*.key
 chmod 644 "$CERT_DIR"/*.crt
 
-# CA-cert for agents
 cp "$CERT_DIR/wiretide-ca.crt" "$STATIC_DIR/ca.crt"
 chown "$SERVICE_USER:$SERVICE_GROUP" "$STATIC_DIR/ca.crt"
 
-### --- (agent bundling and nginx remain unchanged except cert path) ---
+cat > /etc/nginx/sites-available/wiretide <<'EOF'
+server {
+    listen 443 ssl;
+    server_name _;
 
-# NGINX config update below
+    ssl_certificate /opt/wiretide/certs/wiretide.crt;
+    ssl_certificate_key /opt/wiretide/certs/wiretide.key;
+
+    location /ca.crt {
+        alias /opt/wiretide/wiretide/static/ca.crt;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+server {
+    listen 80;
+    server_name _;
+
+    location /static/agent/ {
+        alias /opt/wiretide/wiretide/static/agent/;
+        autoindex on;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+EOF
+
+ln -sf /etc/nginx/sites-available/wiretide /etc/nginx/sites-enabled/wiretide
+rm -f /etc/nginx/sites-enabled/default
+systemctl restart nginx
+
+cat > "$SYSTEMD_SERVICE" <<EOF
+[Unit]
+Description=Wiretide Controller
+After=network.target
+
+[Service]
+User=$SERVICE_USER
+Group=$SERVICE_GROUP
+WorkingDirectory=$WIRETIDE_DIR
+ExecStart=/usr/bin/env uvicorn wiretide.main:app --host 127.0.0.1 --port 8000
+Restart=always
+Environment="PATH=$WIRETIDE_DIR/venv/bin"
+StandardOutput=append:$LOG_FILE
+StandardError=append:$LOG_FILE
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now wiretide
+
+echo "==========================================="
+echo " Wiretide Controller Installed (Clean)"
+echo "-------------------------------------------"
+echo "Running as user: $SERVICE_USER"
+echo "Access:   https://$IP/"
+echo "Username: admin"
+echo "Password: wiretide"
+echo "API Token (for agents): $API_TOKEN"
+echo "CA Download: https://$IP/ca.crt"
+echo "Agent Installer: http://$IP/static/agent/install.sh"
+echo "==========================================="
 
