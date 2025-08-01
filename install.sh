@@ -68,6 +68,12 @@ if [ ! -f "$DB_FILE" ]; then
     deactivate
 fi
 
+# set user rights for db
+chmod 660 "$DB_FILE"
+chown "$SERVICE_USER:$SERVICE_GROUP" "$DB_FILE"
+chmod 770 "$WIRETIDE_DIR"
+
+
 # Logbestand
 mkdir -p "$(dirname "$LOG_FILE")"
 touch "$LOG_FILE"

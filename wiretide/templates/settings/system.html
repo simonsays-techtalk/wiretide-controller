@@ -52,7 +52,7 @@
     <form id="agent-update-form" class="mt-4">
       <label class="flex items-center space-x-2">
         <input type="checkbox" id="agent-updates-enabled" class="form-checkbox h-4 w-4 text-blue-600">
-        <span class="text-sm text-gray-700 dark:text-gray-300">Sta agent updates toe</span>
+        <span class="text-sm text-gray-700 dark:text-gray-300">Allow automatic agent updates</span>
       </label>
       <button type="submit" class="mt-2 px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 hidden" id="agent-update-save">
         Opslaan
@@ -134,7 +134,7 @@
     if (res.ok) {
       saveBtn.classList.add("hidden");
     } else {
-      alert("Fout bij opslaan.");
+      alert("Error while saving.");
     }
   });
 </script>
