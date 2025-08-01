@@ -17,6 +17,16 @@ echo "🔐 Database and certificates are being backupped to $BACKUP_DIR"
 cp wiretide.db "$BACKUP_DIR/"
 cp -r /etc/wiretide/certs "$BACKUP_DIR/"
 
+# Git safe.director
+REPO_DIR=$(pwd)
+REPO_OWNER=$(stat -c '%U' "$REPO_DIR")
+CURRENT_USER=$(whoami)
+
+if [ "$REPO_OWNER" != "$CURRENT_USER" ]; then
+  echo "⚠️  Git repo is maintained by '$REPO_OWNER', but update is run as '$CURRENT_USER'"
+  echo "➕ Add repo to git safe.directory"
+  git config --global --add safe.directory "$REPO_DIR"
+fi
 
 echo "📥 Execute Git pull..."
 git pull --ff-only
