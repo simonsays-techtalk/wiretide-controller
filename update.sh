@@ -28,6 +28,11 @@ if [ "$REPO_OWNER" != "$CURRENT_USER" ]; then
   git config --global --add safe.directory "$REPO_DIR"
 fi
 
+echo "🧹 Repo cleanup before pull..."
+git reset --hard HEAD
+git clean -fd
+
+
 echo "📥 Execute Git pull..."
 git pull --ff-only
 
