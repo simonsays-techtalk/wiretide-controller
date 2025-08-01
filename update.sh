@@ -3,48 +3,66 @@ set -e
 
 echo "📦 Wiretide update process started"
 
-
 PROJECT_DIR="/opt/wiretide"
+VENV_DIR="$PROJECT_DIR/venv"
+BACKUPS_DIR="$PROJECT_DIR/backups"
+CERTS_DIR="/etc/wiretide/certs"
+DB_FILE="$PROJECT_DIR/wiretide.db"
+
 cd "$PROJECT_DIR"
 
-
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-BACKUP_DIR="$PROJECT_DIR/backups/backup_$TIMESTAMP"
+BACKUP_DIR="$BACKUPS_DIR/backup_$TIMESTAMP"
 mkdir -p "$BACKUP_DIR"
 
-
-echo "🔐 Database and certificates are being backupped to $BACKUP_DIR"
-cp wiretide.db "$BACKUP_DIR/"
-cp -r /etc/wiretide/certs "$BACKUP_DIR/"
-
-# Git safe.director
-REPO_DIR=$(pwd)
-REPO_OWNER=$(stat -c '%U' "$REPO_DIR")
-CURRENT_USER=$(whoami)
-
-if [ "$REPO_OWNER" != "$CURRENT_USER" ]; then
-  echo "⚠️  Git repo is maintained by '$REPO_OWNER', but update is run as '$CURRENT_USER'"
-  echo "➕ Add repo to git safe.directory"
-  git config --global --add safe.directory "$REPO_DIR"
+# Backup database
+if [ -f "$DB_FILE" ]; then
+  echo "🗃️  Backing up database to $BACKUP_DIR"
+  cp "$DB_FILE" "$BACKUP_DIR/"
+else
+  echo "⚠️  Database file not found, skipping"
 fi
 
-echo "🧹 Repo cleanup before pull..."
+# Backup certs
+if [ -d "$CERTS_DIR" ]; then
+  echo "🔐 Backing up certificates to $BACKUP_DIR"
+  cp -r "$CERTS_DIR" "$BACKUP_DIR/"
+else
+  echo "⚠️  Certificate directory not found, skipping"
+fi
+
+# Ensure git safe.directory
+REPO_OWNER=$(stat -c '%U' "$PROJECT_DIR")
+CURRENT_USER=$(whoami)
+if [ "$REPO_OWNER" != "$CURRENT_USER" ]; then
+  echo "⚠️  Git repo is owned by '$REPO_OWNER', but running as '$CURRENT_USER'"
+  git config --global --add safe.directory "$PROJECT_DIR"
+fi
+
+# Clean repo and pull latest
+echo "🧹 Cleaning local repo..."
 git reset --hard HEAD
 git clean -fd
 
-
-echo "📥 Execute Git pull..."
+echo "📥 Pulling latest changes from Git..."
 git pull --ff-only
 
-
-if [ -f "requirements.txt" ]; then
-  echo "📦 Python dependencies update..."
-  pip install -r requirements.txt
+# Ensure virtualenv
+if [ ! -d "$VENV_DIR" ]; then
+  echo "📦 Creating virtualenv in $VENV_DIR"
+  python3 -m venv "$VENV_DIR"
+  chown -R "$REPO_OWNER":"$REPO_OWNER" "$VENV_DIR"
 fi
 
+# Install dependencies
+echo "📦 Updating Python dependencies..."
+source "$VENV_DIR/bin/activate"
+pip install -r requirements.txt
+deactivate
 
-echo "🔁 Wiretide service restart..."
+# Restart service
+echo "🔁 Restarting Wiretide service..."
 systemctl restart wiretide.service
 
-echo "✅ Update completed!"
+echo "✅ Wiretide update completed!"
 
