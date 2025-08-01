@@ -2,7 +2,9 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse, FileResponse, RedirectResponse
 import os, re, subprocess, socket, hashlib, threading, time
-
+from fastapi import Form
+from wiretide.config import get_config_value
+from wiretide.db import DB_PATH
 from wiretide.api.auth import rbac_required
 
 LOG_FILE = "/var/log/wiretide.log"
@@ -60,6 +62,20 @@ async def download_logs():
         return FileResponse(LOG_FILE, filename="wiretide.log")
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Log file not found")
+
+
+@router.get("/api/agent-update/settings", dependencies=[rbac_required("system:view")])
+async def get_agent_update_settings():
+    updates_enabled = await get_config_value("agent_updates_enabled", "false") == "true"
+    return {"enabled": updates_enabled}
+
+@router.post("/api/agent-update/settings", dependencies=[rbac_required("system:edit")])
+async def update_agent_update_settings(enabled: str = Form(...)):
+    value = "true" if enabled == "true" else "false"
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE config SET value = ? WHERE key = 'agent_updates_enabled'", (value,))
+        await db.commit()
+    return {"status": "ok", "enabled": value}
 
 
 @router.get("/api/system-info", dependencies=[rbac_required("system:view")])

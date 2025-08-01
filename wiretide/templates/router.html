@@ -18,6 +18,14 @@
     </label>
     <button type="submit" class="bg-blue-600 dark:bg-blue-500 text-white px-4 py-2 rounded">Save</button>
   </form>
+
+  <!-- Agent update toggle (shown only if global updates are disabled) -->
+  <div id="agent-update-control" class="mt-4 hidden">
+    <label class="flex items-center space-x-2">
+      <input type="checkbox" id="agent-update-toggle" class="form-checkbox h-4 w-4 text-blue-600">
+      <span class="text-sm text-gray-700 dark:text-gray-300">Sta agent update toe voor dit apparaat</span>
+    </label>
+  </div>
 </div>
 
 {% if settings %}
@@ -64,3 +72,43 @@
   </div>
 {% endif %}
 {% endblock %}
+
+{% block scripts %}
+<script>
+  async function loadAgentUpdateToggle(mac) {
+    try {
+      const globalRes = await fetch("/api/agent-update/settings");
+      const globalData = await globalRes.json();
+      const globalEnabled = globalData.enabled;
+
+      if (globalEnabled) return; // Per-device toggle niet nodig
+
+      const res = await fetch("/api/devices");
+      const devices = await res.json();
+      const device = devices.find(d => d.mac === mac);
+      if (!device) return;
+
+      document.getElementById("agent-update-control").classList.remove("hidden");
+      const checkbox = document.getElementById("agent-update-toggle");
+      checkbox.checked = !!device.agent_update_allowed;
+
+      checkbox.addEventListener("change", async () => {
+        const enabled = checkbox.checked ? "true" : "false";
+        await fetch(`/api/devices/${encodeURIComponent(mac)}/agent-update`, {
+          method: "POST",
+          body: new URLSearchParams({ enabled })
+        });
+      });
+
+    } catch (err) {
+      console.error("Agent update toggle error:", err);
+    }
+  }
+
+  document.addEventListener("DOMContentLoaded", () => {
+    const mac = "{{ device.mac }}";
+    loadAgentUpdateToggle(mac);
+  });
+</script>
+{% endblock %}
+

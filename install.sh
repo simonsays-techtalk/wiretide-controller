@@ -60,18 +60,13 @@ EOF
     chown "$SERVICE_USER":"$SERVICE_GROUP" "$STATIC_DIR/wiretide_logo.png"
 fi
 
-# Database initialiseren
+# Init DB
 if [ ! -f "$DB_FILE" ]; then
     echo "[*] Creating SQLite database..."
     source venv/bin/activate
-    python db_init.py
+    sudo -u "$SERVICE_USER" env PATH="$WIRETIDE_DIR/venv/bin:$PATH" python db_init.py
     deactivate
 fi
-
-# Rechten en oude SQLite-journals opruimen
-chown "$SERVICE_USER":"$SERVICE_GROUP" "$DB_FILE"
-chmod 660 "$DB_FILE"
-find "$WIRETIDE_DIR" -maxdepth 1 -type f -name "wiretide.db-*" -delete
 
 # Logbestand
 mkdir -p "$(dirname "$LOG_FILE")"

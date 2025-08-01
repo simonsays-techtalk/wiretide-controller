@@ -227,3 +227,42 @@ async def get_device_token(mac: str, request: Request):
             raise HTTPException(status_code=403, detail="Device not approved")
     return {"token": token}
 
+@router.get("/config/agent", dependencies=[Depends(require_api_token)])
+async def get_agent_update_config(request: Request):
+    mac = request.headers.get("X-MAC", "").lower()
+    if not mac:
+        raise HTTPException(status_code=401)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT agent_update_allowed FROM devices WHERE mac = ?", (mac,))
+        row = await cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Device not found")
+        per_device_allowed = bool(row[0])
+
+    updates_enabled = await get_config_value("agent_updates_enabled", "false") == "true"
+    update_url = await get_config_value("agent_update_url", "")
+    min_supported_version = await get_config_value("min_supported_agent_version", "0.1.0")
+
+    allow_update = updates_enabled or per_device_allowed
+
+    return {
+        "update_available": allow_update,
+        "update_url": update_url if allow_update else None,
+        "min_supported_version": min_supported_version
+    }
+
+@router.post("/devices/{mac}/agent-update", dependencies=[rbac_required("devices:manage")])
+async def toggle_agent_update(mac: str, request: Request):
+    form = await request.form()
+    enabled = form.get("enabled", "false").lower() == "true"
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT COUNT(*) FROM devices WHERE mac = ?", (mac,))
+        if (await cursor.fetchone())[0] == 0:
+            raise HTTPException(status_code=404, detail="Device not found")
+        await db.execute("UPDATE devices SET agent_update_allowed = ? WHERE mac = ?", (int(enabled), mac))
+        await db.commit()
+
+    return {"status": "ok", "enabled": enabled}
+

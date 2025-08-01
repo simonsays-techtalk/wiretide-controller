@@ -15,7 +15,7 @@
     </table>
   </div>
 
-  <!-- Certificates (Under Construction) -->
+  <!-- Certificates -->
   <div class="bg-white dark:bg-gray-800 rounded shadow p-4 mb-6">
     <h3 class="text-lg font-semibold mb-2">HTTPS Certificate (Under Construction)</h3>
     <p class="text-sm text-yellow-500 mb-4">
@@ -47,6 +47,17 @@
     <a id="agent-download" href="#" class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700">
       Download Agent (ZIP)
     </a>
+
+    <!-- Toggle for update permission -->
+    <form id="agent-update-form" class="mt-4">
+      <label class="flex items-center space-x-2">
+        <input type="checkbox" id="agent-updates-enabled" class="form-checkbox h-4 w-4 text-blue-600">
+        <span class="text-sm text-gray-700 dark:text-gray-300">Sta agent updates toe</span>
+      </label>
+      <button type="submit" class="mt-2 px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 hidden" id="agent-update-save">
+        Opslaan
+      </button>
+    </form>
   </div>
 
   <!-- Maintenance -->
@@ -88,10 +99,43 @@
         downloadLink.href = "#";
         downloadLink.classList.add("opacity-50", "pointer-events-none");
       }
+
+      // Agent update toggle
+      const updatesRes = await fetch("/api/agent-update/settings");
+      if (updatesRes.ok) {
+        const updateSettings = await updatesRes.json();
+        const checkbox = document.getElementById("agent-updates-enabled");
+        checkbox.checked = updateSettings.enabled;
+      }
+
     } catch (err) {
       console.error("System info load error:", err);
     }
   }
+
   document.addEventListener("DOMContentLoaded", loadSystemInfo);
+
+  // Toggle handler
+  const checkbox = document.getElementById("agent-updates-enabled");
+  const form = document.getElementById("agent-update-form");
+  const saveBtn = document.getElementById("agent-update-save");
+
+  checkbox?.addEventListener("change", () => {
+    saveBtn?.classList.remove("hidden");
+  });
+
+  form?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const enabled = checkbox.checked ? "true" : "false";
+    const res = await fetch("/api/agent-update/settings", {
+      method: "POST",
+      body: new URLSearchParams({ enabled })
+    });
+    if (res.ok) {
+      saveBtn.classList.add("hidden");
+    } else {
+      alert("Fout bij opslaan.");
+    }
+  });
 </script>
 
