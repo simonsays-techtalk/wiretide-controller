@@ -12,8 +12,8 @@ from wiretide.db import DB_PATH
 from wiretide.tokens import ensure_valid_shared_token
 
 
-CERTS_DIR = "/etc/wiretide/certs"
-DB_FILE = DB_PATH  # meestal /opt/wiretide/wiretide.db
+CERTS_DIR = "/opt/wiretide/certs"
+DB_FILE = DB_PATH  
 WIRETIDE_DIR = os.path.dirname(DB_FILE)
 SERVICE_USER = "wiretide"
 SERVICE_GROUP = "wiretide"
