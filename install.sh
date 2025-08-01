@@ -115,6 +115,12 @@ chmod 644 "$CERT_DIR"/*.crt
 cp "$CERT_DIR/wiretide-ca.crt" "$STATIC_DIR/ca.crt"
 chown "$SERVICE_USER:$SERVICE_GROUP" "$STATIC_DIR/ca.crt"
 
+# Ensure ca.crt via Nginx reachable
+chmod o+x /opt
+chmod o+x /opt/wiretide
+chmod o+x /opt/wiretide/wiretide
+chmod o+x /opt/wiretide/wiretide/static
+
 ### --- Agent bundling ---
 DEBUG_LOG="/tmp/wiretide-debug.log"
 cat > "$AGENT_DIR/install.sh" <<EOF
