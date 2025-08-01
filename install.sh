@@ -18,25 +18,25 @@ echo "[*] Installing Wiretide Controller (dedicated '$SERVICE_USER' user, clean 
 
 apt update && apt install -y nginx python3-venv python3-pip sqlite3 openssl git curl
 
-# Maak systeemgebruiker als die nog niet bestaat
+# create service user
 if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
     echo "[*] Creating system user: $SERVICE_USER"
     useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
 fi
 
-# Altijd een schone installatie: verwijder bestaande code
+# Clean install, delete previous code!
 if [ -d "$WIRETIDE_DIR" ]; then
     echo "[*] Removing existing installation at $WIRETIDE_DIR"
     rm -rf "$WIRETIDE_DIR"
 fi
 
-# Clone verse versie
+# Clone fresh version
 git clone "$REPO_URL" "$WIRETIDE_DIR"
 
-# Directories en rechten instellen
+# set directories and access
 mkdir -p "$CERT_DIR" "$STATIC_DIR" "$AGENT_DIR"
 chown -R "$SERVICE_USER":"$SERVICE_GROUP" "$WIRETIDE_DIR"
-chmod 770 "$WIRETIDE_DIR"  # SQLite moet journal/wal-bestanden kunnen maken
+chmod 770 "$WIRETIDE_DIR"  
 chown -R root:"$SERVICE_GROUP" "$CERT_DIR"
 chmod 750 "$CERT_DIR"
 
@@ -74,13 +74,13 @@ chown "$SERVICE_USER:$SERVICE_GROUP" "$DB_FILE"
 chmod 770 "$WIRETIDE_DIR"
 
 
-# Logbestand
+# Logfile
 mkdir -p "$(dirname "$LOG_FILE")"
 touch "$LOG_FILE"
 chown "$SERVICE_USER":"$SERVICE_GROUP" "$LOG_FILE"
 chmod 660 "$LOG_FILE"
 
-# API token instellen
+# Create initial API token
 API_TOKEN=$(sqlite3 "$DB_FILE" "SELECT token FROM tokens LIMIT 1;" || true)
 if [ -z "$API_TOKEN" ]; then
     API_TOKEN=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 32)
@@ -88,7 +88,7 @@ if [ -z "$API_TOKEN" ]; then
     echo "[*] Generated new API token for /register and /status"
 fi
 
-### --- TLS-certificaten ---
+### --- TLS-certificates ---
 echo "[*] Setting up CA and SAN-enabled TLS cert..."
 IP=$(hostname -I | awk '{print $1}')
 if [ ! -f "$CERT_DIR/wiretide-ca.crt" ]; then

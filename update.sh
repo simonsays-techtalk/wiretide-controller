@@ -15,7 +15,7 @@ mkdir -p "$BACKUP_DIR"
 
 echo "🔐 Database en certificaten worden geback-upt naar $BACKUP_DIR"
 cp wiretide.db "$BACKUP_DIR/"
-cp -r data/certs "$BACKUP_DIR/"
+cp -r /etc/wiretide/certs "$BACKUP_DIR/"
 
 
 echo "📥 Git pull uitvoeren..."
