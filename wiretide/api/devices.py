@@ -11,6 +11,8 @@ from wiretide.db import DB_PATH
 from wiretide.api.auth import require_login, require_api_token
 from fastapi.templating import Jinja2Templates
 from wiretide.models import DeviceStatus
+from wiretide.api.auth import rbac_required
+
 
 templates = Jinja2Templates(directory="wiretide/templates")
 router = APIRouter()
