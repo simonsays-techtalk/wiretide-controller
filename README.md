@@ -31,7 +31,8 @@ sudo ./install.sh
 ### Install the Wiretide agent on an OpenWRT device:
 
 ```bash
-wget -O - http://<server-ip>/static/agent/install.sh | sh
+wget --no-check-certificate -O - http://<server-ip>/static/agent/install.sh | sh
+
 ```
 
 ### After installation:
