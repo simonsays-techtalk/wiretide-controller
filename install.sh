@@ -1,15 +1,20 @@
 #!/bin/bash
 set -e
- 
 
-
+# Set default branch if not explicitly passed
+BRANCH="${WIRETIDE_BRANCH:-beta}"
+echo "[*] Installing from branch: $BRANCH"
+if [ "$BRANCH" = "main" ]; then
+    echo "==> PRODUCTION INSTALL"
+else
+    echo "==> DEVELOPMENT INSTALL — beta branch"
+fi
 
 WIRETIDE_DIR="/opt/wiretide"
 CONFIG_DIR="/etc/wiretide"
 CERT_DIR="$WIRETIDE_DIR/certs"
 STATIC_DIR="$WIRETIDE_DIR/wiretide/static"
-AGENT_SRC_DIR="$WIRETIDE_DIR/wiretide/static/agent"
-AGENT_DST_DIR="$STATIC_DIR/agent"
+AGENT_DIR="$STATIC_DIR/agent"
 DB_FILE="$WIRETIDE_DIR/wiretide.db"
 LOG_FILE="/var/log/wiretide.log"
 REPO_URL="https://github.com/simonsays-techtalk/wiretide-controller.git"
@@ -33,9 +38,9 @@ if [ -d "$WIRETIDE_DIR" ]; then
     rm -rf "$WIRETIDE_DIR"
 fi
 
-git clone --branch beta "$REPO_URL" "$WIRETIDE_DIR"
+git clone --branch "$BRANCH" "$REPO_URL" "$WIRETIDE_DIR"
 
-mkdir -p "$CERT_DIR" "$STATIC_DIR" "$AGENT_DST_DIR"
+mkdir -p "$CERT_DIR" "$STATIC_DIR" "$AGENT_DIR"
 chown -R "$SERVICE_USER:$SERVICE_GROUP" "$WIRETIDE_DIR"
 chmod 770 "$WIRETIDE_DIR"
 chown -R "$SERVICE_USER:$SERVICE_GROUP" "$CERT_DIR"
@@ -124,19 +129,15 @@ chmod o+x /opt /opt/wiretide /opt/wiretide/wiretide /opt/wiretide/wiretide/stati
 
 #----------------------------------------
 echo "[*] Preparing agent static files..."
-AGENT_FILES="install.template.sh wiretide-agent-run wiretide-init wiretide-agent.zip"
 
-for f in $AGENT_FILES; do
-    if [ ! -f "$AGENT_SRC_DIR/$f" ]; then
-        echo "❌ Missing required file: $AGENT_SRC_DIR/$f"
-        exit 1
-    fi
-    cp "$AGENT_SRC_DIR/$f" "$AGENT_DST_DIR/"
-done
+if [ ! -f "$AGENT_DIR/install.template.sh" ]; then
+    echo "❌ Missing required file: $AGENT_DIR/install.template.sh"
+    exit 1
+fi
 
-sed "s|__CONTROLLER_URL__|https://$IP|g" "$AGENT_DST_DIR/install.template.sh" > "$AGENT_DST_DIR/install.sh"
-chmod +x "$AGENT_DST_DIR/install.sh" "$AGENT_DST_DIR/wiretide-agent-run" "$AGENT_DST_DIR/wiretide-init"
-chown -R "$SERVICE_USER:$SERVICE_GROUP" "$AGENT_DST_DIR"
+sed "s|__CONTROLLER_URL__|https://$IP|g" "$AGENT_DIR/install.template.sh" > "$AGENT_DIR/install.sh"
+chmod +x "$AGENT_DIR/install.sh" "$AGENT_DIR/wiretide-agent-run" "$AGENT_DIR/wiretide-init"
+chown -R "$SERVICE_USER:$SERVICE_GROUP" "$AGENT_DIR"
 
 #----------------------------------------
 cat > /etc/nginx/sites-available/wiretide <<EOF
@@ -165,7 +166,7 @@ server {
     server_name _;
 
     location /static/agent/ {
-        alias $AGENT_DST_DIR/;
+        alias $AGENT_DIR/;
         autoindex on;
     }
 
