@@ -147,7 +147,7 @@ async def system_info():
 async def restart_controller():
     """Restart the Wiretide systemd service using sudo so NOPASSWD sudoers works."""
     try:
-        subprocess.Popen(["sudo", "systemctl", "restart", "wiretide.service"])
+        subprocess.Popen(["/usr/bin/sudo", "systemctl", "restart", "wiretide.service"])
     except Exception as e:
         print("Restart failed:", e)
         raise HTTPException(status_code=500, detail=f"Failed to restart Wiretide: {e}")
@@ -178,7 +178,7 @@ async def regenerate_cert():
 
 def delayed_restart():
     time.sleep(1)
-    subprocess.run(["sudo", "systemctl", "restart", "wiretide.service"], check=False)
+    subprocess.run(["/usr/bin/sudo", "systemctl", "restart", "wiretide.service"], check=False)
 
 
 @router.post("/restart", dependencies=[rbac_required("system:restart")])

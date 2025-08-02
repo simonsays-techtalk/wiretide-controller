@@ -242,13 +242,17 @@ Group=$SERVICE_GROUP
 WorkingDirectory=$WIRETIDE_DIR
 ExecStart=/usr/bin/env uvicorn wiretide.main:app --host 127.0.0.1 --port 8000
 Restart=always
-Environment="PATH=$WIRETIDE_DIR/venv/bin"
+Environment="PATH=$WIRETIDE_DIR/venv/bin:/usr/bin:/bin"
 StandardOutput=append:$LOG_FILE
 StandardError=append:$LOG_FILE
 
 [Install]
 WantedBy=multi-user.target
 EOF
+
+echo "[*] Granting passwordless sudo for restarting Wiretide service"
+echo "$SERVICE_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart wiretide.service" > /etc/sudoers.d/wiretide-restart
+chmod 440 /etc/sudoers.d/wiretide-restart
 
 systemctl daemon-reload
 systemctl enable --now wiretide
