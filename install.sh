@@ -122,66 +122,27 @@ chmod o+x /opt/wiretide/wiretide
 chmod o+x /opt/wiretide/wiretide/static
 
 ### --- Agent bundling ---
-DEBUG_LOG="/tmp/wiretide-debug.log"
-cat > "$AGENT_DIR/install.sh" <<EOF
-#!/bin/sh
-set -e
-echo ">>> Wiretide Agent Installer"
-CONTROLLER_URL="https://$IP"
-echo ">> Using controller: \$CONTROLLER_URL"
-if [ -f /etc/init.d/wiretide ]; then
-    /etc/init.d/wiretide stop 2>/dev/null || true
-    /etc/init.d/wiretide disable 2>/dev/null || true
-fi
-killall -q wiretide-agent-run 2>/dev/null || true
-rm -f /etc/wiretide-agent-run /etc/init.d/wiretide /etc/wiretide-token
-echo "\$CONTROLLER_URL" > /etc/wiretide-controller
-CA_PATH="/etc/wiretide-ca.crt"
-wget --no-check-certificate -qO "\$CA_PATH" "\$CONTROLLER_URL/ca.crt" || {
-  echo "❌ Failed to download CA cert"; exit 1; }
-chmod 644 "\$CA_PATH"
-mkdir -p /etc/ssl/certs
-cp "\$CA_PATH" /etc/ssl/certs/
-wget --no-check-certificate -qO /etc/wiretide-agent-run "\$CONTROLLER_URL/static/agent/wiretide-agent-run"
-chmod +x /etc/wiretide-agent-run
-wget --no-check-certificate -qO /etc/init.d/wiretide "\$CONTROLLER_URL/static/agent/wiretide-init"
-chmod +x /etc/init.d/wiretide
-/etc/init.d/wiretide enable
-/etc/init.d/wiretide start
-echo "✅ Wiretide Agent installed (Controller: \$CONTROLLER_URL)"
-EOF
-chmod +x "$AGENT_DIR/install.sh"
 
-cat > "$AGENT_DIR/wiretide-agent-run" <<'EOF'
-#!/bin/sh
-CONTROLLER_URL="$(cat /etc/wiretide-controller 2>/dev/null || echo 'https://127.0.0.1')"
-CA_CERT="/etc/wiretide-ca.crt"
-TOKEN_FILE="/etc/wiretide-token"
-INTERVAL=60
-POLL_DELAY=10
-DEBUG_LOG="/tmp/wiretide-debug.log"
-IFACE=""
-[ -d /sys/class/net/br-lan ] && IFACE="br-lan"
-[ -z "$IFACE" ] && IFACE="$(ip route | awk '/default/ {print $5}' | head -n1)"
-[ -z "$IFACE" ] && IFACE="$(ip -o link show | awk -F': ' '/state UP/ && $2 != "lo" {print $2; exit}')"
-MAC="$(ip link show "$IFACE" 2>/dev/null | awk '/ether/ {print $2}')"
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$DEBUG_LOG"; }
-fetch_token() {
-    log "Requesting token for MAC: $MAC"
-    TOKEN=$(curl --cacert "$CA_CERT" -sSf -X GET "$CONTROLLER_URL/token/$MAC" || echo "")
-    if [ -n "$TOKEN" ]; then echo "$TOKEN" > "$TOKEN_FILE"; log "Received token and saved"; else log "Token fetch failed"; fi
-}
-status_update() {
-    [ ! -f "$TOKEN_FILE" ] && return 1
-    TOKEN="$(cat "$TOKEN_FILE")"
-    RESPONSE=$(curl --cacert "$CA_CERT" -s -w "%{http_code}" -o /dev/null -H "Authorization: Bearer $TOKEN" "$CONTROLLER_URL/status/$MAC")
-    [ "$RESPONSE" -eq 401 ] && { log "Token expired, refetching..."; rm -f "$TOKEN_FILE"; fetch_token; }
-}
-log "Starting Wiretide agent (Controller: $CONTROLLER_URL, MAC: $MAC)"
-while [ ! -f "$TOKEN_FILE" ]; do fetch_token; [ -f "$TOKEN_FILE" ] || sleep "$POLL_DELAY"; done
-while true; do status_update; sleep "$INTERVAL"; done
-EOF
-chmod +x "$AGENT_DIR/wiretide-agent-run"
+# Ensure all agent files exist in the repo
+REPO_AGENT_DIR="$WIRETIDE_DIR/wiretide/static/agent"
+AGENT_FILES="install.sh wiretide-agent-run wiretide-init wiretide-agent.zip"
+
+echo "[*] Preparing agent static files..."
+mkdir -p "$AGENT_DIR"
+
+for f in $AGENT_FILES; do
+    if [ ! -f "$REPO_AGENT_DIR/$f" ]; then
+        echo "❌ Missing required file: $REPO_AGENT_DIR/$f"
+        exit 1
+    fi
+    cp "$REPO_AGENT_DIR/$f" "$AGENT_DIR/"
+done
+
+# Replace placeholder in install.sh with actual controller IP
+sed -i "s|__CONTROLLER_URL__|https://$IP|g" "$AGENT_DIR/install.sh"
+
+chmod +x "$AGENT_DIR/install.sh" "$AGENT_DIR/wiretide-agent-run" "$AGENT_DIR/wiretide-init"
+chown -R "$SERVICE_USER:$SERVICE_GROUP" "$AGENT_DIR"
 
 cat > "$AGENT_DIR/wiretide-init" <<'EOF'
 #!/bin/sh /etc/rc.common
