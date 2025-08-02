@@ -242,7 +242,7 @@ Group=$SERVICE_GROUP
 WorkingDirectory=$WIRETIDE_DIR
 ExecStart=/usr/bin/env uvicorn wiretide.main:app --host 127.0.0.1 --port 8000
 Restart=always
-Environment="PATH=$WIRETIDE_DIR/venv/bin"
+Environment="PATH=$WIRETIDE_DIR/venv/bin:/usr/bin:/bin"
 StandardOutput=append:$LOG_FILE
 StandardError=append:$LOG_FILE
 
