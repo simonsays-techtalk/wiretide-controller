@@ -26,6 +26,13 @@ DEBUG_LOG="/tmp/wiretide-debug.log"
 PAYLOAD_FILE="/tmp/wiretide-last-payload.json"
 DHCP_DEBUG="/tmp/wiretide-hostname-debug.txt"
 
+# Sanity check: warn if system time is suspicious
+NOW_YEAR="$(date +%Y)"
+if [ "$NOW_YEAR" -lt 2020 ]; then
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠️  System clock appears invalid (year: $NOW_YEAR), TLS may fail" >> "$DEBUG_LOG"
+fi
+
+
 # Primary interface + MAC
 IFACE=""
 [ -d /sys/class/net/br-lan ] && IFACE="br-lan"

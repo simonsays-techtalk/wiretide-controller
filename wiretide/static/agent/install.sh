@@ -7,6 +7,17 @@ echo ">>> Wiretide Agent Installer"
 CONTROLLER_URL="__CONTROLLER_URL__"
 echo ">> Using controller: $CONTROLLER_URL"
 
+# --- Ensure curl is installed ---
+if ! command -v curl >/dev/null 2>&1; then
+    echo ">> curl not found, attempting to install..."
+    opkg update
+    opkg install curl || {
+        echo "❌ Failed to install curl"
+        exit 1
+    }
+    echo "✅ curl installed"
+fi
+
 # --- Clean up any old agent first ---
 if [ -f /etc/init.d/wiretide ]; then
     echo ">> Stopping and removing old Wiretide agent..."
