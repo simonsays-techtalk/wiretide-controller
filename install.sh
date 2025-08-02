@@ -1,12 +1,7 @@
 #!/bin/bash
 set -e
+ 
 
-echo "[*] Installing from branch: $BRANCH"
-if [ "$BRANCH" = "main" ]; then
-    echo "==> PRODUCTION INSTALL"
-else
-    echo "==> DEVELOPMENT INSTALL — beta branch"
-fi
 
 
 WIRETIDE_DIR="/opt/wiretide"
