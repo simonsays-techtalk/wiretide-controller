@@ -250,6 +250,10 @@ StandardError=append:$LOG_FILE
 WantedBy=multi-user.target
 EOF
 
+echo "[*] Granting passwordless sudo for restarting Wiretide service"
+echo "$SERVICE_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart wiretide.service" > /etc/sudoers.d/wiretide-restart
+chmod 440 /etc/sudoers.d/wiretide-restart
+
 systemctl daemon-reload
 systemctl enable --now wiretide
 
