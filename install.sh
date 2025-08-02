@@ -8,16 +8,6 @@ else
     echo "==> DEVELOPMENT INSTALL — beta branch"
 fi
 
-# Try to extract branch from raw.githubusercontent URL if used
-if [[ "$0" == *"raw.githubusercontent.com"* ]]; then
-  BRANCH=$(echo "$0" | awk -F'/' '{print $(NF-2)}')
-else
-  BRANCH="main"  # fallback
-fi
-
-echo "[*] Using branch: $BRANCH"
-git clone --branch "$BRANCH" "$REPO_URL" "$WIRETIDE_DIR"
-
 
 WIRETIDE_DIR="/opt/wiretide"
 CONFIG_DIR="/etc/wiretide"
@@ -48,6 +38,7 @@ if [ -d "$WIRETIDE_DIR" ]; then
     rm -rf "$WIRETIDE_DIR"
 fi
 
+git clone --branch beta "$REPO_URL" "$WIRETIDE_DIR"
 
 mkdir -p "$CERT_DIR" "$STATIC_DIR" "$AGENT_DST_DIR"
 chown -R "$SERVICE_USER:$SERVICE_GROUP" "$WIRETIDE_DIR"
