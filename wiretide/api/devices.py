@@ -118,7 +118,7 @@ async def list_devices(_: str = Depends(require_login)):
             "hostname": row[0],
             "mac": row[1],
             "ip": row[2],
-            "last_seen": format_local(row[3]),
+            "last_seen": (datetime.fromisoformat(row[3]).astimezone(timezone.utc).isoformat().replace("+00:00", "Z")if row[3] else None),
             "status": row[4],
             "ssh_enabled": bool(row[5]),
             "device_type": row[6],
@@ -205,19 +205,72 @@ async def device_page(device_type: str, mac: str, request: Request, _: str = Dep
 
 @router.post("/api/queue-config")
 async def queue_config(mac: str = Form(...), config_json: str = Form(...), _: str = Depends(require_login)):
+    import os, glob
+
+    # --- Helpers ---
+    def get_valid_firewall_profiles():
+        profile_dir = "/etc/wiretide/profiles"
+        profiles = []
+        for path in glob.glob(os.path.join(profile_dir, "firewall-*.conf")):
+            name = os.path.basename(path).replace("firewall-", "").replace(".conf", "")
+            profiles.append(name)
+        return profiles
+
+    allowed_apps = ["adblock", "ipban"]
+    valid_profiles = get_valid_firewall_profiles()
+
     try:
         parsed = json.loads(config_json)
     except Exception:
         raise HTTPException(400, detail="Invalid JSON")
 
+    if not isinstance(parsed, dict) or "tasks" not in parsed:
+        raise HTTPException(400, detail="Missing 'tasks' list")
+
+    if not isinstance(parsed["tasks"], list):
+        raise HTTPException(400, detail="'tasks' must be a list")
+
+    # Validate device exists and is approved
     async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT approved FROM devices WHERE mac = ?", (mac,))
+        row = await cursor.fetchone()
+        if not row:
+            raise HTTPException(404, detail="Device not found")
+        if not row[0]:
+            raise HTTPException(403, detail="Device not approved")
+
+        # Validate each task
+        for task in parsed["tasks"]:
+            if not isinstance(task, dict) or "action" not in task:
+                raise HTTPException(400, detail="Each task must be a dict with 'action'")
+
+            action = task["action"]
+            if action == "install_app":
+                if task.get("name") not in allowed_apps:
+                    raise HTTPException(400, detail=f"Invalid app: {task.get('name')}")
+            elif action == "set_firewall_profile":
+                if task.get("profile") not in valid_profiles:
+                    raise HTTPException(400, detail=f"Invalid profile: {task.get('profile')}")
+            elif action == "update_firmware":
+                url = task.get("url")
+                if not url or not url.startswith("http") or not url.endswith(".bin"):
+                    raise HTTPException(400, detail="Invalid firmware URL")
+            elif action == "set_dhcp":
+                conf = task.get("config")
+                if not isinstance(conf, dict) or not all(k in conf for k in ["start", "limit"]):
+                    raise HTTPException(400, detail="Invalid DHCP config")
+            else:
+                raise HTTPException(400, detail=f"Unknown action: {action}")
+
         await db.execute("""
             INSERT INTO device_configs (mac, config, created_at)
             VALUES (?, ?, ?)
             ON CONFLICT(mac) DO UPDATE SET config=excluded.config, created_at=excluded.created_at
         """, (mac, json.dumps(parsed), datetime.now()))
         await db.commit()
-    return {"status": "queued"}
+
+    return {"status": "queued", "tasks": len(parsed["tasks"])}
+
 
 @router.get("/token/{mac}")
 async def get_device_token(mac: str, request: Request):

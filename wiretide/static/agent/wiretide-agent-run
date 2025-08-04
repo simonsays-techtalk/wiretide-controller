@@ -1,14 +1,7 @@
 #!/bin/sh
 
-
-# Wiretide Agent (Hybrid + Hostname Debug Logging)
-# - Cross-matches Wi-Fi and ARP clients with /tmp/dhcp.leases
-# - Logs all DHCP MAC→hostname pairs
-# - Logs every client and whether it matched DHCP
-# - Normalizes all MACs (lowercase)
-# - Avoids subshells (CLIENTS builds correctly)
-
-VERSION="Wiretide Agent v2025.07.28"
+# Wiretide Agent (Hybrid + Hostname Debug Logging + Task Execution)
+VERSION="Wiretide Agent v2025.08.04+tasks"
 
 # Kill any other running copies (self-cleanup)
 for pid in $(ps w | grep '[w]iretide-agent-run' | awk '{print $1}'); do
@@ -26,14 +19,11 @@ DEBUG_LOG="/tmp/wiretide-debug.log"
 PAYLOAD_FILE="/tmp/wiretide-last-payload.json"
 DHCP_DEBUG="/tmp/wiretide-hostname-debug.txt"
 
-# Sanity check: warn if system time is suspicious
 NOW_YEAR="$(date +%Y)"
 if [ "$NOW_YEAR" -lt 2020 ]; then
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠️  System clock appears invalid (year: $NOW_YEAR), TLS may fail" >> "$DEBUG_LOG"
 fi
 
-
-# Primary interface + MAC
 IFACE=""
 [ -d /sys/class/net/br-lan ] && IFACE="br-lan"
 [ -z "$IFACE" ] && IFACE="$(ip route | awk '/default/ {print $5}' | head -n1)"
@@ -42,7 +32,6 @@ MAC="$(ip link show "$IFACE" 2>/dev/null | awk '/ether/ {print tolower($2)}')"
 DEVICE_IP="$(ip -4 addr show "$IFACE" 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1)"
 MODEL="$(cat /tmp/sysinfo/model 2>/dev/null)"
 FPR="$(dropbearkey -y -f /etc/dropbear/dropbear_rsa_host_key 2>/dev/null | awk -F': ' '/Fingerprint/ {print $2}')"
-
 HOSTNAME="$(uci get system.@system[0].hostname 2>/dev/null || hostname 2>/dev/null)"
 [ -z "$HOSTNAME" ] && HOSTNAME="$MAC"
 
@@ -54,7 +43,6 @@ normalize_mac() {
   echo "$1" | tr 'A-F' 'a-f'
 }
 
-# Lookup DHCP entry (returns "IP,Hostname" or empty)
 lookup_dhcp() {
   mac="$(normalize_mac "$1")"
   awk -v mac="$mac" 'tolower($2)==mac {hn=$4; if(hn=="*"||hn=="")hn="unknown"; print $3","hn; exit}' /tmp/dhcp.leases 2>/dev/null
@@ -73,7 +61,6 @@ build_payload() {
   SSH_ENABLED=false
   pgrep dropbear >/dev/null && [ -s /etc/dropbear/dropbear_rsa_host_key ] && SSH_ENABLED=true
 
-  # DNS servers
   DNS_RAW="$(uci get dhcp.@dnsmasq[0].server 2>/dev/null || grep '^nameserver' /tmp/resolv.conf | awk '{print $2}')"
   DNS_LIST=""
   for ip in $DNS_RAW; do
@@ -86,8 +73,6 @@ build_payload() {
 
   CLIENTS=""
   SEEN="/tmp/wt-seen-macs"; > "$SEEN"
-
-  # Dump all DHCP leases (for debugging)
   awk '{printf "DHCP: MAC=%s HOST=%s\n", tolower($2), $4}' /tmp/dhcp.leases > "$DHCP_DEBUG"
 
   add_client() {
@@ -95,14 +80,10 @@ build_payload() {
     echo "$mac" | grep -Eq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' || return
     [ -n "$CLIENTS" ] && CLIENTS="$CLIENTS,"
     CLIENTS="$CLIENTS{ \"mac\":\"$mac\",\"ip\":\"$ip\",\"hostname\":\"$hn\",\"interface\":\"$ifc\",\"connected_via\":\"$via\",\"rx_bytes\":0,\"tx_bytes\":0 }"
-    if [ "$hn" != "unknown" ]; then
-      log "Added client (DHCP hostname): MAC=$mac IP=$ip Hostname=$hn IF=$ifc Via=$via"
-    else
+    [ "$hn" != "unknown" ] && log "Added client (DHCP hostname): MAC=$mac IP=$ip Hostname=$hn IF=$ifc Via=$via" || \
       log "Added client (no hostname): MAC=$mac IP=$ip Hostname=unknown IF=$ifc Via=$via"
-    fi
   }
 
-  # Wi-Fi stations (cross-match with DHCP)
   for ifc in $(iw dev 2>/dev/null | awk '/Interface/{print $2}'); do
     for sta in $(iw dev "$ifc" station dump | awk '/Station/{print $2}' | tr 'A-Z' 'a-z'); do
       echo "$sta" >> "$SEEN"
@@ -113,7 +94,6 @@ build_payload() {
     done
   done
 
-  # DHCP leases (Ethernet, direct)
   if [ -f /tmp/dhcp.leases ]; then
     while read -r exp mac ip hostname cid; do
       cm="$(normalize_mac "$mac")"
@@ -125,7 +105,6 @@ build_payload() {
     done < /tmp/dhcp.leases
   fi
 
-  # ARP neighbors (cross-match with DHCP)
   while read -r ip dev ll mac rest; do
     cm="$(normalize_mac "$mac")"
     echo "$ip" | grep -q '^fe80::' && continue
@@ -209,8 +188,42 @@ send_status() {
   fi
 }
 
-log "Starting Wiretide agent (Controller: $CONTROLLER_URL, MAC: $MAC)"
+execute_tasks() {
+  [ ! -f "$TOKEN_FILE" ] && return
+  TOKEN="$(cat "$TOKEN_FILE")"
+  RESPONSE="$(curl --cacert "$CA_CERT" -s -H "X-API-Token: $TOKEN" -H "X-MAC: $MAC" "$CONTROLLER_URL/config")"
+  TASKS="$(echo "$RESPONSE" | jq -c '.config.tasks // []')"
+  [ "$TASKS" = "[]" ] && return
+  log "Executing tasks..."
+  for row in $(echo "$TASKS" | jq -c '.[]'); do
+    ACTION="$(echo "$row" | jq -r '.action')"
+    case "$ACTION" in
+      install_app)
+        NAME="$(echo "$row" | jq -r '.name')"
+        log "Installing app: $NAME"
+        opkg update && opkg install "$NAME" && log "Installed: $NAME" || log "Failed: $NAME"
+        ;;
+      set_firewall_profile)
+        PROFILE="$(echo "$row" | jq -r '.profile')"
+        FILE="/etc/wiretide/profiles/firewall-$PROFILE.conf"
+        [ -f "$FILE" ] && cp "$FILE" /etc/config/firewall && /etc/init.d/firewall restart && log "Applied profile: $PROFILE" || log "Missing profile: $PROFILE"
+        ;;
+      update_firmware)
+        URL="$(echo "$row" | jq -r '.url')"
+        wget -O /tmp/fw.bin "$URL" && sysupgrade /tmp/fw.bin &
+        ;;
+      set_dhcp)
+        echo "$row" | jq -r '.config | to_entries[] | "uci set dhcp.@dnsmasq[0].\(.key)=\"\(.value)\""' | sh
+        uci commit dhcp && /etc/init.d/dnsmasq restart && log "DHCP config updated"
+        ;;
+      *)
+        log "Unknown task: $ACTION"
+        ;;
+    esac
+  done
+}
 
+log "Starting Wiretide agent (Controller: $CONTROLLER_URL, MAC: $MAC)"
 register_device
 
 while [ ! -f "$TOKEN_FILE" ]; do
@@ -220,6 +233,7 @@ done
 
 while true; do
   send_status
+  execute_tasks
   if [ ! -f "$TOKEN_FILE" ]; then
     while [ ! -f "$TOKEN_FILE" ]; do
       fetch_token
