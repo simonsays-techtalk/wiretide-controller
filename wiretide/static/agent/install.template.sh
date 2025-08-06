@@ -18,6 +18,10 @@ if ! command -v curl >/dev/null 2>&1; then
     echo "✅ curl installed"
 fi
 
+echo ">> Installing required packages (jq)..."
+opkg update
+opkg install jq
+
 # --- Clean up any old agent first ---
 if [ -f /etc/init.d/wiretide ]; then
     echo ">> Stopping and removing old Wiretide agent..."

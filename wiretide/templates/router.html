@@ -67,7 +67,7 @@
 <div id="tab-apps" class="tab-content hidden">
   <div class="bg-white dark:bg-gray-800 p-4 rounded shadow space-y-2">
     <label><input type="checkbox" id="install-adblock" class="mr-2">Install Adblock</label><br>
-    <label><input type="checkbox" id="install-ipban" class="mr-2">Install IPBan</label><br>
+    <label><input type="checkbox" id="install-banip" class="mr-2">Install banIP</label><br>
     <button onclick="queueAppTasks()" class="mt-2 px-4 py-2 bg-blue-600 text-white rounded">Send to Device</button>
   </div>
 </div>
@@ -89,6 +89,21 @@
 
 {% block scripts %}
 <script>
+  function sortObject(o) {
+    if (Array.isArray(o)) return o.map(sortObject);
+    if (o && typeof o === 'object') {
+      return Object.keys(o).sort().reduce((acc, k) => {
+        acc[k] = sortObject(o[k]);
+        return acc;
+      }, {});
+    }
+    return o;
+  }
+
+  function stableStringify(obj) {
+    return JSON.stringify(sortObject(obj));
+  }
+
   document.querySelectorAll(".tab-btn").forEach(btn => {
     btn.addEventListener("click", () => {
       const target = btn.dataset.tab;
@@ -103,26 +118,71 @@
     const mac = "{{ device.mac }}";
     const profile = document.getElementById("firewall-profile").value;
     if (!profile) return;
-    const config = { tasks: [{ action: "set_firewall_profile", profile }] };
+    const pkg = { firewall_profile: profile };
+    const pkgStr = stableStringify(pkg);
+    const sha = await sha256(pkgStr);
+
     const formData = new FormData();
     formData.append("mac", mac);
-    formData.append("config_json", JSON.stringify(config));
-    await fetch("/api/queue-config", { method: "POST", body: formData });
+    formData.append("package_json", pkgStr);
+    formData.append("sha256", sha);
+
+    try {
+      const res = await fetch("/api/queue-config", { method: "POST", body: formData });
+      if (res.ok) {
+        alert("Firewall profile sent to device.");
+      } else {
+        const body = await res.json();
+        let msg = "Unknown error";
+        if (typeof body.detail === "string") msg = body.detail;
+        else if (Array.isArray(body.detail)) msg = body.detail.map(e => e.msg || JSON.stringify(e)).join(", ");
+        else if (typeof body.detail === "object") msg = JSON.stringify(body.detail);
+        alert("Failed: " + msg);
+      }
+    } catch (err) {
+      alert("Network error: " + err);
+    }
+  }
+
+  async function sha256(str) {
+    const buf = new TextEncoder().encode(str);
+    const hash = await crypto.subtle.digest("SHA-256", buf);
+    return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, "0")).join("");
   }
 
   async function queueAppTasks() {
     const mac = "{{ device.mac }}";
     const adblock = document.getElementById("install-adblock").checked;
-    const ipban = document.getElementById("install-ipban").checked;
-    const tasks = [];
-    if (adblock) tasks.push({ action: "install_app", name: "adblock" });
-    if (ipban) tasks.push({ action: "install_app", name: "ipban" });
-    if (tasks.length === 0) return;
-    const config = { tasks };
+    const banIP = document.getElementById("install-banip").checked;
+    const apps = [];
+    if (adblock) apps.push("adblock");
+    if (banIP) apps.push("banip");
+    if (apps.length === 0) return;
+
+    const pkg = { apps };
+    const pkgStr = stableStringify(pkg);
+    const sha = await sha256(pkgStr);
+
     const formData = new FormData();
     formData.append("mac", mac);
-    formData.append("config_json", JSON.stringify(config));
-    await fetch("/api/queue-config", { method: "POST", body: formData });
+    formData.append("package_json", pkgStr);
+    formData.append("sha256", sha);
+
+    try {
+      const res = await fetch("/api/queue-config", { method: "POST", body: formData });
+      if (res.ok) {
+        alert("App install package sent to device.");
+      } else {
+        const body = await res.json();
+        let msg = "Unknown error";
+        if (typeof body.detail === "string") msg = body.detail;
+        else if (Array.isArray(body.detail)) msg = body.detail.map(e => e.msg || JSON.stringify(e)).join(", ");
+        else if (typeof body.detail === "object") msg = JSON.stringify(body.detail);
+        alert("Failed: " + msg);
+      }
+    } catch (err) {
+      alert("Network error: " + err);
+    }
   }
 </script>
 {% endblock %}

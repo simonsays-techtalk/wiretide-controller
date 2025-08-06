@@ -57,6 +57,10 @@ find_interface() {
   echo "unknown"
 }
 
+sha256_json() {
+  echo "$1" | jq -S -c . | sed 's/: /:/g' | tr -d '\n' | sha256sum | awk '{print $1}'
+}
+
 build_payload() {
   SSH_ENABLED=false
   pgrep dropbear >/dev/null && [ -s /etc/dropbear/dropbear_rsa_host_key ] && SSH_ENABLED=true
@@ -188,40 +192,61 @@ send_status() {
   fi
 }
 
-execute_tasks() {
+handle_package() {
   [ ! -f "$TOKEN_FILE" ] && return
   TOKEN="$(cat "$TOKEN_FILE")"
   RESPONSE="$(curl --cacert "$CA_CERT" -s -H "X-API-Token: $TOKEN" -H "X-MAC: $MAC" "$CONTROLLER_URL/config")"
-  TASKS="$(echo "$RESPONSE" | jq -c '.config.tasks // []')"
-  [ "$TASKS" = "[]" ] && return
-  log "Executing tasks..."
-  for row in $(echo "$TASKS" | jq -c '.[]'); do
-    ACTION="$(echo "$row" | jq -r '.action')"
-    case "$ACTION" in
-      install_app)
-        NAME="$(echo "$row" | jq -r '.name')"
-        log "Installing app: $NAME"
-        opkg update && opkg install "$NAME" && log "Installed: $NAME" || log "Failed: $NAME"
-        ;;
-      set_firewall_profile)
-        PROFILE="$(echo "$row" | jq -r '.profile')"
-        FILE="/etc/wiretide/profiles/firewall-$PROFILE.conf"
-        [ -f "$FILE" ] && cp "$FILE" /etc/config/firewall && /etc/init.d/firewall restart && log "Applied profile: $PROFILE" || log "Missing profile: $PROFILE"
-        ;;
-      update_firmware)
-        URL="$(echo "$row" | jq -r '.url')"
-        wget -O /tmp/fw.bin "$URL" && sysupgrade /tmp/fw.bin &
-        ;;
-      set_dhcp)
-        echo "$row" | jq -r '.config | to_entries[] | "uci set dhcp.@dnsmasq[0].\(.key)=\"\(.value)\""' | sh
-        uci commit dhcp && /etc/init.d/dnsmasq restart && log "DHCP config updated"
-        ;;
-      *)
-        log "Unknown task: $ACTION"
-        ;;
-    esac
+  PKG_JSON="$(echo "$RESPONSE" | jq -c '.package')"
+  EXPECTED="$(echo "$RESPONSE" | jq -r '.sha256')"
+
+  if [ "$PKG_JSON" = "{}" ] || [ -z "$EXPECTED" ]; then
+    return
+  fi
+
+  ACTUAL="$(sha256_json "$PKG_JSON")"
+  if [ "$EXPECTED" != "$ACTUAL" ]; then
+    log "Package SHA256 mismatch (expected $EXPECTED, got $ACTUAL)"
+    return
+  fi
+
+  log "Executing config package..."
+
+  FIREWALL_PROFILE="$(echo "$PKG_JSON" | jq -r '.firewall_profile // empty')"
+  if [ -n "$FIREWALL_PROFILE" ]; then
+    FILE="/etc/wiretide/profiles/firewall-$FIREWALL_PROFILE.conf"
+    EXPECTED_HASH="$(echo "$RESPONSE" | jq -r '.package_hashes.firewall_profile // empty')"
+    if [ -n "$EXPECTED_HASH" ]; then
+      ACTUAL_HASH="$(sha256sum "$FILE" 2>/dev/null | awk '{print $1}')"
+      if [ "$EXPECTED_HASH" != "$ACTUAL_HASH" ]; then
+        log "Firewall profile hash mismatch ($FIREWALL_PROFILE)"
+        return
+      fi
+    fi
+    [ -f "$FILE" ] && cp "$FILE" /etc/config/firewall && /etc/init.d/firewall restart && log "Applied profile: $FIREWALL_PROFILE" || log "Missing profile: $FIREWALL_PROFILE"
+  fi
+
+  opkg update
+  echo "$PKG_JSON" | jq -r '.apps[]?' | while IFS= read -r app; do
+    if [ -n "$(opkg list-installed "$app" 2>/dev/null)" ]; then
+      log "$app already installed"
+    else
+      log "Installing app: $app"
+      if opkg install "$app"; then
+        VERSION="$(opkg list-installed "$app" | awk '{print $3}')"
+        log "Installed: $app (version $VERSION)"
+      else
+        log "Failed to install: $app"
+      fi
+    fi
   done
+
+  DHCP_CONFIG="$(echo "$PKG_JSON" | jq -c '.dhcp // {}')"
+  if echo "$DHCP_CONFIG" | jq -e 'to_entries | length > 0' >/dev/null 2>&1; then
+    echo "$DHCP_CONFIG" | jq -r 'to_entries[] | "uci set dhcp.@dnsmasq[0].\(.key)=\"\(.value)\""' | sh
+    uci commit dhcp && /etc/init.d/dnsmasq restart && log "DHCP config updated"
+  fi
 }
+
 
 log "Starting Wiretide agent (Controller: $CONTROLLER_URL, MAC: $MAC)"
 register_device
@@ -233,7 +258,7 @@ done
 
 while true; do
   send_status
-  execute_tasks
+  handle_package
   if [ ! -f "$TOKEN_FILE" ]; then
     while [ ! -f "$TOKEN_FILE" ]; do
       fetch_token
