@@ -42,14 +42,14 @@
       <a href="/clients"
          class="relative block px-3 py-2 rounded hover:bg-gray-100 dark:hover:bg-gray-700 
                 text-gray-700 dark:text-white
-                {% if request.url.path.startswith('/clients') %}
+                {% if request.url.path == '/clients' or request.url.path == '/clients/' %}
                   bg-gray-200 dark:bg-gray-700 font-semibold
                 {% endif %}">
-        {% if request.url.path.startswith('/clients') %}
-          <span class="absolute left-0 top-0 bottom-0 w-1 bg-blue-500 rounded-r"></span>
-        {% endif %}
-        Clients
-      </a>
+         {% if request.url.path == '/clients' or request.url.path == '/clients/' %}
+           <span class="absolute left-0 top-0 bottom-0 w-1 bg-blue-500 rounded-r"></span>
+         {% endif %}
+         Clients
+        </a>
 
       <!-- Settings -->
       <a href="/settings"

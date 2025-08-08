@@ -34,6 +34,16 @@
 
 {% block scripts %}
 <script>
+  function formatLocalTime(utcString) {
+    if (!utcString) return 'no data';
+    try {
+      const date = new Date(utcString);
+      return date.toLocaleString("nl-NL", { timeZone: "Europe/Amsterdam" });
+    } catch {
+      return 'invalid date';
+    }
+  }
+  
   function toggleTheme() {
     const html = document.documentElement;
     const isDark = html.classList.contains("dark");
@@ -103,7 +113,7 @@
               </td>
               <td class="p-2 border">${d.mac}</td>
               <td class="p-2 border">${d.ip}</td>
-              <td class="p-2 border">${d.last_seen}</td>
+              <td class="p-2 border">${formatLocalTime(d.last_seen)}</td>
               <td class="p-2 border">${d.ssh_enabled ? '✅' : '❌'}</td>
               <td class="p-2 border">${d.status}</td>
               <td class="p-2 border">${d.device_type || 'unknown'}</td>

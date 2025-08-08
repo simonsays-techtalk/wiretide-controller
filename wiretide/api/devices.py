@@ -2,6 +2,7 @@ from fastapi import APIRouter, Request, HTTPException, Form, Depends
 from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel
 from wiretide.timeutil import format_local
+from datetime import timezone
 import json
 import enum
 import aiosqlite
@@ -90,7 +91,7 @@ async def device_status(status: DeviceStatus, request: Request, _: str = Depends
 
 @router.get("/config")
 async def get_config(request: Request, _: str = Depends(require_api_token)):
-    """Return queued config for an approved device."""
+    """Return queued package for an approved device."""
     mac = request.headers.get("X-MAC", "").lower()
     if not mac:
         raise HTTPException(status_code=401)
@@ -102,8 +103,16 @@ async def get_config(request: Request, _: str = Depends(require_api_token)):
         cursor = await db.execute("SELECT config FROM device_configs WHERE mac = ?", (mac,))
         row = await cursor.fetchone()
         if not row:
-            return JSONResponse({"config": {}, "available": False})
-        return JSONResponse({"config": json.loads(row[0]), "available": True})
+            return JSONResponse({"package": {}, "available": False})
+        try:
+            config_data = json.loads(row[0])
+            return JSONResponse({
+                "package": config_data.get("package", {}),
+                "sha256": config_data.get("sha256", ""),
+                "available": True
+            })
+        except Exception:
+            return JSONResponse({"package": {}, "available": False})
 
 @router.get("/api/devices")
 async def list_devices(_: str = Depends(require_login)):
@@ -118,7 +127,7 @@ async def list_devices(_: str = Depends(require_login)):
             "hostname": row[0],
             "mac": row[1],
             "ip": row[2],
-            "last_seen": format_local(row[3]),
+            "last_seen": (datetime.fromisoformat(row[3]).astimezone(timezone.utc).isoformat().replace("+00:00", "Z")if row[3] else None),
             "status": row[4],
             "ssh_enabled": bool(row[5]),
             "device_type": row[6],
@@ -204,20 +213,37 @@ async def device_page(device_type: str, mac: str, request: Request, _: str = Dep
     })
 
 @router.post("/api/queue-config")
-async def queue_config(mac: str = Form(...), config_json: str = Form(...), _: str = Depends(require_login)):
+async def queue_config(mac: str = Form(...), package_json: str = Form(...), sha256: str = Form(...), _: str = Depends(require_login)):
+    import hashlib
+
     try:
-        parsed = json.loads(config_json)
+        package = json.loads(package_json)
     except Exception:
-        raise HTTPException(400, detail="Invalid JSON")
+        raise HTTPException(400, detail="Invalid JSON in package")
+
+    # Controleer SHA256
+    calculated = hashlib.sha256(json.dumps(package, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+    if calculated != sha256:
+        raise HTTPException(400, detail="SHA256 mismatch")
 
     async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT approved FROM devices WHERE mac = ?", (mac,))
+        row = await cursor.fetchone()
+        if not row:
+            raise HTTPException(404, detail="Device not found")
+        if not row[0]:
+            raise HTTPException(403, detail="Device not approved")
+
+        config_blob = json.dumps({"package": package, "sha256": sha256})
         await db.execute("""
             INSERT INTO device_configs (mac, config, created_at)
             VALUES (?, ?, ?)
             ON CONFLICT(mac) DO UPDATE SET config=excluded.config, created_at=excluded.created_at
-        """, (mac, json.dumps(parsed), datetime.now()))
+        """, (mac, config_blob, datetime.now()))
         await db.commit()
-    return {"status": "queued"}
+
+    return {"status": "queued", "keys": list(package.keys())}
 
 @router.get("/token/{mac}")
 async def get_device_token(mac: str, request: Request):

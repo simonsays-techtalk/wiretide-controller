@@ -7,6 +7,21 @@ echo ">>> Wiretide Agent Installer"
 CONTROLLER_URL="__CONTROLLER_URL__"
 echo ">> Using controller: $CONTROLLER_URL"
 
+# --- Ensure curl is installed ---
+if ! command -v curl >/dev/null 2>&1; then
+    echo ">> curl not found, attempting to install..."
+    opkg update
+    opkg install curl || {
+        echo "❌ Failed to install curl"
+        exit 1
+    }
+    echo "✅ curl installed"
+fi
+
+echo ">> Installing required packages (jq)..."
+opkg update
+opkg install jq
+
 # --- Clean up any old agent first ---
 if [ -f /etc/init.d/wiretide ]; then
     echo ">> Stopping and removing old Wiretide agent..."
@@ -31,12 +46,18 @@ mkdir -p /etc/ssl/certs
 cp "$CA_PATH" /etc/ssl/certs/
 echo "✅ CA certificate installed"
 
-# --- Fetch latest agent scripts ---
-echo ">> Downloading agent runtime and init scripts..."
+# --- Fetch latest agent scripts and profiles ---
+echo ">> Downloading agent runtime, profiles and init scripts..."
 wget --no-check-certificate -qO /etc/wiretide-agent-run "$CONTROLLER_URL/static/agent/wiretide-agent-run" || {
   echo "❌ Failed to download wiretide-agent-run"
   exit 1
 }
+
+mkdir -p /etc/wiretide/profiles
+cd /etc/wiretide/profiles
+wget --no-check-certificate "$CONTROLLER_URL/static/agent/profiles/firewall-default.conf" -O firewall-default.conf
+wget --no-check-certificate "$CONTROLLER_URL/static/agent/profiles/firewall-strict.conf" -O firewall-strict.conf
+
 chmod +x /etc/wiretide-agent-run
 
 wget --no-check-certificate -qO /etc/init.d/wiretide "$CONTROLLER_URL/static/agent/wiretide-init" || {

@@ -4,111 +4,186 @@
 {% block content %}
 <h1 class="text-2xl font-bold mb-4">Router: {{ device.hostname }}</h1>
 
-<div class="bg-white dark:bg-gray-800 p-4 rounded shadow space-y-2">
-  <p><strong>MAC:</strong> {{ device.mac }}</p>
-  <p><strong>IP:</strong> {{ device.ip }}</p>
-  <p><strong>SSH:</strong> {{ "Enabled" if device.ssh_enabled else "Disabled" }}</p>
+<!-- Tab navigation -->
+<div class="border-b border-gray-600 mb-4">
+  <nav class="flex space-x-4" id="tab-nav">
+    <button class="tab-btn px-3 py-2 text-sm font-medium text-white bg-blue-600 rounded-t" data-tab="live">Live Info</button>
+    <button class="tab-btn px-3 py-2 text-sm font-medium text-white hover:bg-blue-700" data-tab="firewall">Firewall</button>
+    <button class="tab-btn px-3 py-2 text-sm font-medium text-white hover:bg-blue-700" data-tab="dhcp">DHCP</button>
+    <button class="tab-btn px-3 py-2 text-sm font-medium text-white hover:bg-blue-700" data-tab="apps">Apps</button>
+    <button class="tab-btn px-3 py-2 text-sm font-medium text-white hover:bg-blue-700" data-tab="logs">Logs</button>
+    <button class="tab-btn px-3 py-2 text-sm font-medium text-white hover:bg-blue-700" data-tab="advanced">Advanced</button>
+  </nav>
+</div>
 
-  <h2 class="text-xl font-semibold mt-4">Configuration</h2>
-  <form method="post" action="/clients/router/{{ device.mac }}/update" class="space-y-2">
-    <label class="block">
-      <span class="text-sm text-gray-700 dark:text-gray-200">Hostname</span>
-      <input name="hostname" value="{{ device.hostname }}"
-             class="border p-2 rounded w-full dark:bg-gray-700 dark:text-white dark:border-gray-600">
-    </label>
-    <button type="submit" class="bg-blue-600 dark:bg-blue-500 text-white px-4 py-2 rounded">Save</button>
-  </form>
+<!-- Live Info Tab -->
+<div id="tab-live" class="tab-content">
+  <div class="bg-white dark:bg-gray-800 p-4 rounded shadow space-y-2">
+    <p><strong>MAC:</strong> {{ device.mac }}</p>
+    <p><strong>IP:</strong> {{ device.ip }}</p>
+    <p><strong>SSH:</strong> {{ "Enabled" if device.ssh_enabled else "Disabled" }}</p>
+  </div>
 
-  <!-- Agent update toggle (shown only if global updates are disabled) -->
-  <div id="agent-update-control" class="mt-4 hidden">
-    <label class="flex items-center space-x-2">
-      <input type="checkbox" id="agent-update-toggle" class="form-checkbox h-4 w-4 text-blue-600">
-      <span class="text-sm text-gray-700 dark:text-gray-300">Sta agent update toe voor dit apparaat</span>
-    </label>
+  {% if settings %}
+    <div class="bg-white dark:bg-gray-800 p-4 mt-6 rounded shadow">
+      <h2 class="text-xl font-semibold mb-2">Live Device Status</h2>
+      <table class="table-auto border w-full text-sm text-gray-900 dark:text-gray-100">
+        <tbody>
+          <tr><td class="p-2 border font-medium">Model</td><td class="p-2 border">{{ settings.model or '—' }}</td></tr>
+          <tr><td class="p-2 border font-medium">LAN IP</td><td class="p-2 border">{{ device.ip }}</td></tr>
+          <tr><td class="p-2 border font-medium">WAN IP</td><td class="p-2 border">{{ settings.wan_ip or '—' }}</td></tr>
+          <tr><td class="p-2 border font-medium">DNS Servers</td>
+            <td class="p-2 border">{% if settings.dns %}{{ settings.dns | join(", ") }}{% else %}—{% endif %}</td></tr>
+          <tr><td class="p-2 border font-medium">Firewall</td><td class="p-2 border">{{ settings.firewall_state.capitalize() if settings.firewall_state else '—' }}</td></tr>
+          <tr><td class="p-2 border font-medium">NTP</td><td class="p-2 border">{{ 'Enabled' if settings.ntp_synced else 'Disabled' }}</td></tr>
+          <tr><td class="p-2 border font-medium">Last Updated</td><td class="p-2 border">{{ settings.updated_at }}</td></tr>
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
+</div>
+
+<!-- Firewall Tab -->
+<div id="tab-firewall" class="tab-content hidden">
+  <div class="bg-white dark:bg-gray-800 p-4 rounded shadow space-y-4">
+    <h2 class="text-xl font-semibold">Firewall Profile</h2>
+    <select id="firewall-profile" class="w-full p-2 border rounded dark:bg-gray-700 dark:text-white">
+      <option value="">-- select --</option>
+      <option value="default">Default</option>
+      <option value="strict">Strict</option>
+    </select>
+    <button onclick="queueFirewallTask()" class="px-4 py-2 bg-blue-600 text-white rounded">Send to Device</button>
   </div>
 </div>
 
-{% if settings %}
-  <div class="bg-white dark:bg-gray-800 p-4 mt-6 rounded shadow">
-    <h2 class="text-xl font-semibold mb-2">Live Device Status</h2>
-    <table class="table-auto border w-full text-sm text-gray-900 dark:text-gray-100">
-      <tbody>
-        <tr>
-          <td class="p-2 border font-medium">Model</td>
-          <td class="p-2 border">{{ settings.model or '—' }}</td>
-        </tr>
-        <tr>
-          <td class="p-2 border font-medium">LAN IP</td>
-          <td class="p-2 border">{{ device.ip }}</td>
-        </tr>
-        <tr>
-          <td class="p-2 border font-medium">WAN IP</td>
-          <td class="p-2 border">{{ settings.wan_ip or '—' }}</td>
-        </tr>
-        <tr>
-          <td class="p-2 border font-medium">DNS Servers</td>
-          <td class="p-2 border">
-            {% if settings.dns %}
-              {{ settings.dns | join(", ") }}
-            {% else %}
-              —
-            {% endif %}
-          </td>
-        </tr>
-        <tr>
-          <td class="p-2 border font-medium">Firewall</td>
-          <td class="p-2 border">{{ settings.firewall_state.capitalize() if settings.firewall_state else '—' }}</td>
-        </tr>
-        <tr>
-          <td class="p-2 border font-medium">NTP</td>
-          <td class="p-2 border">{{ 'Enabled' if settings.ntp_synced else 'Disabled' }}</td>
-        </tr>
-        <tr>
-          <td class="p-2 border font-medium">Last Updated</td>
-          <td class="p-2 border">{{ settings.updated_at }}</td>
-        </tr>
-      </tbody>
-    </table>
+<!-- DHCP Tab -->
+<div id="tab-dhcp" class="tab-content hidden">
+  <div class="bg-white dark:bg-gray-800 p-4 rounded shadow">
+    <p class="text-gray-400">(To be implemented)</p>
   </div>
-{% endif %}
+</div>
+
+<!-- Apps Tab -->
+<div id="tab-apps" class="tab-content hidden">
+  <div class="bg-white dark:bg-gray-800 p-4 rounded shadow space-y-2">
+    <label><input type="checkbox" id="install-adblock" class="mr-2">Install Adblock</label><br>
+    <label><input type="checkbox" id="install-banip" class="mr-2">Install banIP</label><br>
+    <button onclick="queueAppTasks()" class="mt-2 px-4 py-2 bg-blue-600 text-white rounded">Send to Device</button>
+  </div>
+</div>
+
+<!-- Logs Tab -->
+<div id="tab-logs" class="tab-content hidden">
+  <div class="bg-white dark:bg-gray-800 p-4 rounded shadow">
+    <p class="text-gray-400">(To be implemented)</p>
+  </div>
+</div>
+
+<!-- Advanced Tab -->
+<div id="tab-advanced" class="tab-content hidden">
+  <div class="bg-white dark:bg-gray-800 p-4 rounded shadow">
+    <p class="text-gray-400">(To be implemented)</p>
+  </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-  async function loadAgentUpdateToggle(mac) {
+  function sortObject(o) {
+    if (Array.isArray(o)) return o.map(sortObject);
+    if (o && typeof o === 'object') {
+      return Object.keys(o).sort().reduce((acc, k) => {
+        acc[k] = sortObject(o[k]);
+        return acc;
+      }, {});
+    }
+    return o;
+  }
+
+  function stableStringify(obj) {
+    return JSON.stringify(sortObject(obj));
+  }
+
+  document.querySelectorAll(".tab-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const target = btn.dataset.tab;
+      document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("bg-blue-600", "rounded-t"));
+      btn.classList.add("bg-blue-600", "rounded-t");
+      document.querySelectorAll(".tab-content").forEach(tab => tab.classList.add("hidden"));
+      document.getElementById(`tab-${target}`).classList.remove("hidden");
+    });
+  });
+
+  async function queueFirewallTask() {
+    const mac = "{{ device.mac }}";
+    const profile = document.getElementById("firewall-profile").value;
+    if (!profile) return;
+    const pkg = { firewall_profile: profile };
+    const pkgStr = stableStringify(pkg);
+    const sha = await sha256(pkgStr);
+
+    const formData = new FormData();
+    formData.append("mac", mac);
+    formData.append("package_json", pkgStr);
+    formData.append("sha256", sha);
+
     try {
-      const globalRes = await fetch("/api/agent-update/settings");
-      const globalData = await globalRes.json();
-      const globalEnabled = globalData.enabled;
-
-      if (globalEnabled) return; // Per-device toggle niet nodig
-
-      const res = await fetch("/api/devices");
-      const devices = await res.json();
-      const device = devices.find(d => d.mac === mac);
-      if (!device) return;
-
-      document.getElementById("agent-update-control").classList.remove("hidden");
-      const checkbox = document.getElementById("agent-update-toggle");
-      checkbox.checked = !!device.agent_update_allowed;
-
-      checkbox.addEventListener("change", async () => {
-        const enabled = checkbox.checked ? "true" : "false";
-        await fetch(`/api/devices/${encodeURIComponent(mac)}/agent-update`, {
-          method: "POST",
-          body: new URLSearchParams({ enabled })
-        });
-      });
-
+      const res = await fetch("/api/queue-config", { method: "POST", body: formData });
+      if (res.ok) {
+        alert("Firewall profile sent to device.");
+      } else {
+        const body = await res.json();
+        let msg = "Unknown error";
+        if (typeof body.detail === "string") msg = body.detail;
+        else if (Array.isArray(body.detail)) msg = body.detail.map(e => e.msg || JSON.stringify(e)).join(", ");
+        else if (typeof body.detail === "object") msg = JSON.stringify(body.detail);
+        alert("Failed: " + msg);
+      }
     } catch (err) {
-      console.error("Agent update toggle error:", err);
+      alert("Network error: " + err);
     }
   }
 
-  document.addEventListener("DOMContentLoaded", () => {
+  async function sha256(str) {
+    const buf = new TextEncoder().encode(str);
+    const hash = await crypto.subtle.digest("SHA-256", buf);
+    return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  async function queueAppTasks() {
     const mac = "{{ device.mac }}";
-    loadAgentUpdateToggle(mac);
-  });
+    const adblock = document.getElementById("install-adblock").checked;
+    const banIP = document.getElementById("install-banip").checked;
+    const apps = [];
+    if (adblock) apps.push("adblock");
+    if (banIP) apps.push("banip");
+    if (apps.length === 0) return;
+
+    const pkg = { apps };
+    const pkgStr = stableStringify(pkg);
+    const sha = await sha256(pkgStr);
+
+    const formData = new FormData();
+    formData.append("mac", mac);
+    formData.append("package_json", pkgStr);
+    formData.append("sha256", sha);
+
+    try {
+      const res = await fetch("/api/queue-config", { method: "POST", body: formData });
+      if (res.ok) {
+        alert("App install package sent to device.");
+      } else {
+        const body = await res.json();
+        let msg = "Unknown error";
+        if (typeof body.detail === "string") msg = body.detail;
+        else if (Array.isArray(body.detail)) msg = body.detail.map(e => e.msg || JSON.stringify(e)).join(", ");
+        else if (typeof body.detail === "object") msg = JSON.stringify(body.detail);
+        alert("Failed: " + msg);
+      }
+    } catch (err) {
+      alert("Network error: " + err);
+    }
+  }
 </script>
 {% endblock %}
 

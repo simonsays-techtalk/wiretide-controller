@@ -1,6 +1,15 @@
 #!/bin/bash
 set -e
 
+# Set default branch if not explicitly passed
+BRANCH="${WIRETIDE_BRANCH:-beta}"
+echo "[*] Installing from branch: $BRANCH"
+if [ "$BRANCH" = "main" ]; then
+    echo "==> PRODUCTION INSTALL"
+else
+    echo "==> DEVELOPMENT INSTALL — beta branch"
+fi
+
 WIRETIDE_DIR="/opt/wiretide"
 CONFIG_DIR="/etc/wiretide"
 CERT_DIR="$WIRETIDE_DIR/certs"
@@ -14,6 +23,7 @@ SERVICE_USER="wiretide"
 SERVICE_GROUP="wiretide"
 SYSTEMD_SERVICE="/etc/systemd/system/wiretide.service"
 
+#----------------------------------------
 echo "[*] Installing Wiretide Controller (dedicated '$SERVICE_USER' user, clean install)..."
 
 apt update && apt install -y nginx python3-venv python3-pip sqlite3 openssl git curl
@@ -28,7 +38,7 @@ if [ -d "$WIRETIDE_DIR" ]; then
     rm -rf "$WIRETIDE_DIR"
 fi
 
-git clone "$REPO_URL" "$WIRETIDE_DIR"
+git clone --branch "$BRANCH" "$REPO_URL" "$WIRETIDE_DIR"
 
 mkdir -p "$CERT_DIR" "$STATIC_DIR" "$AGENT_DIR"
 chown -R "$SERVICE_USER:$SERVICE_GROUP" "$WIRETIDE_DIR"
@@ -77,6 +87,7 @@ if [ -z "$API_TOKEN" ]; then
     echo "[*] Generated new API token for /register and /status"
 fi
 
+#----------------------------------------
 echo "[*] Setting up CA and SAN-enabled TLS cert..."
 IP=$(hostname -I | awk '{print $1}')
 if [ ! -f "$CERT_DIR/wiretide-ca.crt" ]; then
@@ -114,101 +125,39 @@ chmod 644 "$CERT_DIR"/*.crt
 
 cp "$CERT_DIR/wiretide-ca.crt" "$STATIC_DIR/ca.crt"
 chown "$SERVICE_USER:$SERVICE_GROUP" "$STATIC_DIR/ca.crt"
+chmod o+x /opt /opt/wiretide /opt/wiretide/wiretide /opt/wiretide/wiretide/static
 
-# Ensure ca.crt via Nginx reachable
-chmod o+x /opt
-chmod o+x /opt/wiretide
-chmod o+x /opt/wiretide/wiretide
-chmod o+x /opt/wiretide/wiretide/static
+#----------------------------------------
+echo "[*] Preparing agent static files..."
 
-### --- Agent bundling ---
-DEBUG_LOG="/tmp/wiretide-debug.log"
-cat > "$AGENT_DIR/install.sh" <<EOF
-#!/bin/sh
-set -e
-echo ">>> Wiretide Agent Installer"
-CONTROLLER_URL="https://$IP"
-echo ">> Using controller: \$CONTROLLER_URL"
-if [ -f /etc/init.d/wiretide ]; then
-    /etc/init.d/wiretide stop 2>/dev/null || true
-    /etc/init.d/wiretide disable 2>/dev/null || true
+if [ ! -f "$AGENT_DIR/install.template.sh" ]; then
+    echo "❌ Missing required file: $AGENT_DIR/install.template.sh"
+    exit 1
 fi
-killall -q wiretide-agent-run 2>/dev/null || true
-rm -f /etc/wiretide-agent-run /etc/init.d/wiretide /etc/wiretide-token
-echo "\$CONTROLLER_URL" > /etc/wiretide-controller
-CA_PATH="/etc/wiretide-ca.crt"
-wget --no-check-certificate -qO "\$CA_PATH" "\$CONTROLLER_URL/ca.crt" || {
-  echo "❌ Failed to download CA cert"; exit 1; }
-chmod 644 "\$CA_PATH"
-mkdir -p /etc/ssl/certs
-cp "\$CA_PATH" /etc/ssl/certs/
-wget --no-check-certificate -qO /etc/wiretide-agent-run "\$CONTROLLER_URL/static/agent/wiretide-agent-run"
-chmod +x /etc/wiretide-agent-run
-wget --no-check-certificate -qO /etc/init.d/wiretide "\$CONTROLLER_URL/static/agent/wiretide-init"
-chmod +x /etc/init.d/wiretide
-/etc/init.d/wiretide enable
-/etc/init.d/wiretide start
-echo "✅ Wiretide Agent installed (Controller: \$CONTROLLER_URL)"
-EOF
-chmod +x "$AGENT_DIR/install.sh"
 
-cat > "$AGENT_DIR/wiretide-agent-run" <<'EOF'
-#!/bin/sh
-CONTROLLER_URL="$(cat /etc/wiretide-controller 2>/dev/null || echo 'https://127.0.0.1')"
-CA_CERT="/etc/wiretide-ca.crt"
-TOKEN_FILE="/etc/wiretide-token"
-INTERVAL=60
-POLL_DELAY=10
-DEBUG_LOG="/tmp/wiretide-debug.log"
-IFACE=""
-[ -d /sys/class/net/br-lan ] && IFACE="br-lan"
-[ -z "$IFACE" ] && IFACE="$(ip route | awk '/default/ {print $5}' | head -n1)"
-[ -z "$IFACE" ] && IFACE="$(ip -o link show | awk -F': ' '/state UP/ && $2 != "lo" {print $2; exit}')"
-MAC="$(ip link show "$IFACE" 2>/dev/null | awk '/ether/ {print $2}')"
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$DEBUG_LOG"; }
-fetch_token() {
-    log "Requesting token for MAC: $MAC"
-    TOKEN=$(curl --cacert "$CA_CERT" -sSf -X GET "$CONTROLLER_URL/token/$MAC" || echo "")
-    if [ -n "$TOKEN" ]; then echo "$TOKEN" > "$TOKEN_FILE"; log "Received token and saved"; else log "Token fetch failed"; fi
-}
-status_update() {
-    [ ! -f "$TOKEN_FILE" ] && return 1
-    TOKEN="$(cat "$TOKEN_FILE")"
-    RESPONSE=$(curl --cacert "$CA_CERT" -s -w "%{http_code}" -o /dev/null -H "Authorization: Bearer $TOKEN" "$CONTROLLER_URL/status/$MAC")
-    [ "$RESPONSE" -eq 401 ] && { log "Token expired, refetching..."; rm -f "$TOKEN_FILE"; fetch_token; }
-}
-log "Starting Wiretide agent (Controller: $CONTROLLER_URL, MAC: $MAC)"
-while [ ! -f "$TOKEN_FILE" ]; do fetch_token; [ -f "$TOKEN_FILE" ] || sleep "$POLL_DELAY"; done
-while true; do status_update; sleep "$INTERVAL"; done
-EOF
-chmod +x "$AGENT_DIR/wiretide-agent-run"
+sed "s|__CONTROLLER_URL__|https://$IP|g" "$AGENT_DIR/install.template.sh" > "$AGENT_DIR/install.sh"
+chmod +x "$AGENT_DIR/install.sh" "$AGENT_DIR/wiretide-agent-run" "$AGENT_DIR/wiretide-init"
+chown -R "$SERVICE_USER:$SERVICE_GROUP" "$AGENT_DIR"
 
-cat > "$AGENT_DIR/wiretide-init" <<'EOF'
-#!/bin/sh /etc/rc.common
-START=99
-start() { /etc/wiretide-agent-run & }
-stop() { kill "$(pgrep -f wiretide-agent-run)" 2>/dev/null; }
-EOF
-chmod +x "$AGENT_DIR/wiretide-init"
-
-cat > /etc/nginx/sites-available/wiretide <<'EOF'
+#----------------------------------------
+cat > /etc/nginx/sites-available/wiretide <<EOF
 server {
     listen 443 ssl;
     server_name _;
 
-    ssl_certificate /opt/wiretide/certs/wiretide.crt;
-    ssl_certificate_key /opt/wiretide/certs/wiretide.key;
+    ssl_certificate $CERT_DIR/wiretide.crt;
+    ssl_certificate_key $CERT_DIR/wiretide.key;
 
     location /ca.crt {
-        alias /opt/wiretide/wiretide/static/ca.crt;
+        alias $STATIC_DIR/ca.crt;
     }
 
     location / {
         proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
     }
 }
 
@@ -217,12 +166,12 @@ server {
     server_name _;
 
     location /static/agent/ {
-        alias /opt/wiretide/wiretide/static/agent/;
+        alias $AGENT_DIR/;
         autoindex on;
     }
 
     location / {
-        return 301 https://$host$request_uri;
+        return 301 https://\$host\$request_uri;
     }
 }
 EOF
@@ -231,6 +180,7 @@ ln -sf /etc/nginx/sites-available/wiretide /etc/nginx/sites-enabled/wiretide
 rm -f /etc/nginx/sites-enabled/default
 systemctl restart nginx
 
+#----------------------------------------
 cat > "$SYSTEMD_SERVICE" <<EOF
 [Unit]
 Description=Wiretide Controller
@@ -257,6 +207,7 @@ chmod 440 /etc/sudoers.d/wiretide-restart
 systemctl daemon-reload
 systemctl enable --now wiretide
 
+#----------------------------------------
 echo "==========================================="
 echo " Wiretide Controller Installed (Clean)"
 echo "-------------------------------------------"
