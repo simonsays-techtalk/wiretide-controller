@@ -63,11 +63,19 @@ async def device_status(status: DeviceStatus, request: Request, _: str = Depends
     mac_lower = status.mac.lower()
 
     async with aiosqlite.connect(DB_PATH) as db:
+        # Update basisgegevens in devices
         await db.execute("""
             UPDATE devices
             SET ip = ?, ssh_enabled = ?, last_seen = ?, hostname = ?, status_json = ?
             WHERE mac = ? AND status != 'removed'
-        """, (client_ip, status.ssh_enabled, now, status.hostname, json.dumps(status.dict()), mac_lower))
+        """, (
+            client_ip,
+            status.ssh_enabled,
+            now,
+            status.hostname,
+            json.dumps(status.dict()),
+            mac_lower
+        ))
 
         if status.settings:
             model = status.settings.get("model")
@@ -75,19 +83,38 @@ async def device_status(status: DeviceStatus, request: Request, _: str = Depends
             dns = status.settings.get("dns") or []
             ntp_synced = bool(status.settings.get("ntp"))
             fw_state = "enabled" if status.settings.get("firewall") else "disabled"
+            fw_profile = status.settings.get("firewall_profile")
+            sec_samples = status.settings.get("security_log_samples") or []
 
             await db.execute("""
-                INSERT INTO device_status (mac, model, wan_ip, dns_servers, ntp_synced, firewall_state, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO device_status (
+                    mac, model, wan_ip, dns_servers, ntp_synced, firewall_state,
+                    firewall_profile_active, security_log_samples, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(mac) DO UPDATE SET
                   model = excluded.model,
                   wan_ip = excluded.wan_ip,
                   dns_servers = excluded.dns_servers,
                   ntp_synced = excluded.ntp_synced,
                   firewall_state = excluded.firewall_state,
+                  firewall_profile_active = excluded.firewall_profile_active,
+                  security_log_samples = excluded.security_log_samples,
                   updated_at = excluded.updated_at
-            """, (mac_lower, model, wan_ip, json.dumps(dns), ntp_synced, fw_state, now))
+            """, (
+                mac_lower,
+                model,
+                wan_ip,
+                json.dumps(dns),
+                ntp_synced,
+                fw_state,
+                fw_profile,
+                json.dumps(sec_samples),
+                now
+            ))
+
         await db.commit()
+
 
 @router.get("/config")
 async def get_config(request: Request, _: str = Depends(require_api_token)):

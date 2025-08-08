@@ -46,15 +46,68 @@
 <!-- Firewall Tab -->
 <div id="tab-firewall" class="tab-content hidden">
   <div class="bg-white dark:bg-gray-800 p-4 rounded shadow space-y-4">
-    <h2 class="text-xl font-semibold">Firewall Profile</h2>
+
+    <p class="text-sm text-gray-400">
+      Active profile:
+      <span id="fw-active">
+        {{ (settings.firewall_profile_active if settings and settings.firewall_profile_active) or '—' }}
+      </span>
+    </p>
+
+    <label class="block font-medium">Firewall Profile</label>
     <select id="firewall-profile" class="w-full p-2 border rounded dark:bg-gray-700 dark:text-white">
       <option value="">-- select --</option>
       <option value="default">Default</option>
       <option value="strict">Strict</option>
     </select>
-    <button onclick="queueFirewallTask()" class="px-4 py-2 bg-blue-600 text-white rounded">Send to Device</button>
+
+    <hr class="my-4">
+
+    <h3 class="text-lg font-semibold">Security Logging</h3>
+    <label class="inline-flex items-center">
+      <input type="checkbox" id="sec-enabled" class="mr-2"> Enable security logging
+    </label>
+    <div class="grid grid-cols-3 gap-3 mt-2">
+      <div>
+        <label class="block text-sm">Level</label>
+        <select id="sec-level" class="w-full p-2 border rounded dark:bg-gray-700 dark:text-white">
+          <option>debug</option>
+          <option selected>info</option>
+          <option>notice</option>
+          <option>warn</option>
+          <option>err</option>
+        </select>
+      </div>
+      <div>
+        <label class="block text-sm">Prefix</label>
+        <input id="sec-prefix" value="WTSEC" class="w-full p-2 border rounded dark:bg-gray-700 dark:text-white">
+      </div>
+      <div>
+        <label class="block text-sm">Rate</label>
+        <input id="sec-rate" value="10/second" class="w-full p-2 border rounded dark:bg-gray-700 dark:text-white">
+      </div>
+    </div>
+
+    <button onclick="sendFirewallPackage()" class="mt-4 px-4 py-2 bg-blue-600 text-white rounded">
+      Send to Device
+    </button>
+
+    <div class="mt-6">
+      <h3 class="text-lg font-semibold">Recent Security Events</h3>
+      <pre class="mt-2 p-3 bg-black text-green-200 rounded overflow-auto max-h-64">
+{{ ("\n".join(json.loads(settings.security_log_samples)) if settings and settings.security_log_samples else "(no security events yet)") }}
+      </pre>
+    </div>
+
+    <div class="mt-4 text-sm">
+      <a class="text-blue-400 underline" href="https://www.grc.com/x/ne.dll?bh0bkyd2" target="_blank" rel="noopener">
+        Test firewall (ShieldsUP!)
+      </a>
+    </div>
+
   </div>
 </div>
+
 
 <!-- DHCP Tab -->
 <div id="tab-dhcp" class="tab-content hidden">
@@ -114,11 +167,19 @@
     });
   });
 
-  async function queueFirewallTask() {
+  async function sendFirewallPackage() {
     const mac = "{{ device.mac }}";
-    const profile = document.getElementById("firewall-profile").value;
-    if (!profile) return;
-    const pkg = { firewall_profile: profile };
+    const profile = document.getElementById("firewall-profile").value || undefined;
+    const sec = {
+      enabled: document.getElementById("sec-enabled").checked,
+      level: document.getElementById("sec-level").value,
+      prefix: document.getElementById("sec-prefix").value || "WTSEC",
+      rate: document.getElementById("sec-rate").value || "10/second",
+    };
+    const pkg = {};
+    if (profile) pkg.firewall_profile = profile;
+    pkg.security_logging = sec;
+
     const pkgStr = stableStringify(pkg);
     const sha = await sha256(pkgStr);
 
@@ -130,7 +191,7 @@
     try {
       const res = await fetch("/api/queue-config", { method: "POST", body: formData });
       if (res.ok) {
-        alert("Firewall profile sent to device.");
+        alert("Firewall package queued.");
       } else {
         const body = await res.json();
         let msg = "Unknown error";
@@ -186,4 +247,3 @@
   }
 </script>
 {% endblock %}
-
