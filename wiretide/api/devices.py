@@ -11,6 +11,9 @@ from wiretide.db import DB_PATH
 from wiretide.api.auth import require_login, require_api_token, rbac_required
 from wiretide.models import DeviceStatus
 
+from fastapi.responses import JSONResponse
+
+
 templates = Jinja2Templates(directory="wiretide/templates")
 router = APIRouter()
 
@@ -51,7 +54,6 @@ async def register_device(device: DeviceRegistration, request: Request):
 
 @router.post("/status")
 async def accept_status(payload: dict = Body(...)):
-    # Accept both agents: old (flat) and new (nested under settings)
     mac = (payload.get("mac") or "").lower()
     if not mac:
         return JSONResponse({"error": "missing mac"}, status_code=400)
@@ -66,28 +68,28 @@ async def accept_status(payload: dict = Body(...)):
                 return payload[k]
         return default
 
-    model = pick("model", default="unknown")
-    wan_ip = pick("wan_ip", "wan")
-    dns   = pick("dns", "dns_servers", default=[])
-    ntp   = pick("ntp", "ntp_synced", default=False)
-    fw_state = pick("firewall", "firewall_state", default="active")
-    fw_prof  = pick("firewall_profile", "firewall_profile_active", default=None)
-    sec_raw  = pick("security_log_samples", default=[])
+    model       = pick("model", default="unknown")
+    wan_ip      = pick("wan_ip", default=None)
+    dns         = pick("dns", "dns_servers", default=[])
+    ntp         = pick("ntp", "ntp_synced", default=False)
+    fw_state    = pick("firewall", "firewall_state", default=True)
+    fw_profile  = pick("firewall_profile", "firewall_profile_active", default=None)
+    sec_raw     = pick("security_log_samples", default=[])
+    ssh_enabled = bool(payload.get("ssh_enabled"))
 
-    # Normalize DNS to JSON list
+    # Normalize DNS -> list[str]
     if isinstance(dns, str):
         try:
             maybe = json.loads(dns)
             dns_list = maybe if isinstance(maybe, list) else [dns]
         except Exception:
-            dns_list = [x.strip() for x in dns.split(',') if x.strip()]
+            dns_list = [x.strip() for x in dns.split(",") if x.strip()]
     elif isinstance(dns, list):
         dns_list = [str(x) for x in dns]
     else:
         dns_list = []
 
-    # Normalize security logs to JSON list of strings (max 50 items)
-    sec_list = []
+    # Normalize security logs -> list[str] (cap 50)
     if isinstance(sec_raw, list):
         sec_list = [str(x) for x in sec_raw][-50:]
     elif isinstance(sec_raw, str):
@@ -98,6 +100,7 @@ async def accept_status(payload: dict = Body(...)):
     updated_at = datetime.now(timezone.utc).isoformat()
 
     async with aiosqlite.connect(DB_PATH) as db:
+        # Upsert live status
         await db.execute(
             """
             INSERT INTO device_status (
@@ -121,15 +124,21 @@ async def accept_status(payload: dict = Body(...)):
                 json.dumps(dns_list),
                 1 if ntp else 0,
                 str(fw_state) if fw_state is not None else None,
-                str(fw_prof) if fw_prof is not None else None,
+                str(fw_profile) if fw_profile is not None else None,
                 json.dumps(sec_list),
                 updated_at,
             ),
         )
+
+        # 👉 Fix 2: update ook devices.last_seen (en ssh_enabled)
+        await db.execute(
+            "UPDATE devices SET last_seen = ?, ssh_enabled = ? WHERE mac = ?",
+            (updated_at, 1 if ssh_enabled else 0, mac),
+        )
+
         await db.commit()
 
-    return {"status": "ok", "mac": mac, "events": len(sec_list)}
-
+    return {"status": "ok", "mac": mac, "events": len(sec_list), "profile": fw_profile}
 @router.get("/config")
 async def get_config(request: Request, _: str = Depends(require_api_token)):
     mac = request.headers.get("X-MAC", "").lower()
@@ -158,8 +167,18 @@ async def get_config(request: Request, _: str = Depends(require_api_token)):
 async def list_devices(_: str = Depends(require_login)):
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""
-            SELECT hostname, mac, ip, last_seen, status, ssh_enabled, device_type, approved
-            FROM devices ORDER BY last_seen DESC
+            SELECT
+              d.hostname,
+              d.mac,
+              d.ip,
+              COALESCE(ds.updated_at, d.last_seen) AS last_seen,
+              d.status,
+              d.ssh_enabled,
+              d.device_type,
+              d.approved
+            FROM devices d
+            LEFT JOIN device_status ds ON ds.mac = d.mac
+            ORDER BY last_seen DESC
         """)
         rows = await cursor.fetchall()
     return JSONResponse(content=[
@@ -167,13 +186,14 @@ async def list_devices(_: str = Depends(require_login)):
             "hostname": row[0],
             "mac": row[1],
             "ip": row[2],
-            "last_seen": (datetime.fromisoformat(row[3]).astimezone(timezone.utc).isoformat().replace("+00:00", "Z") if row[3] else None),
+            "last_seen": row[3],  # ISO string uit DB; front-end formatLocalTime doet de rest
             "status": row[4],
             "ssh_enabled": bool(row[5]),
             "device_type": row[6],
-            "approved": bool(row[7])
+            "approved": bool(row[7]),
         } for row in rows
     ])
+
 
 @router.post("/api/approve")
 async def approve_device(mac: str = Form(...), device_type: str = Form(...), _: str = Depends(require_login)):
