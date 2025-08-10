@@ -1,24 +1,18 @@
 from fastapi import APIRouter, Request, HTTPException, Form, Depends
 from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel
-from wiretide.timeutil import format_local
-from datetime import timezone
-import json
-import enum
-import aiosqlite
-from datetime import datetime
+from datetime import timezone, datetime
+import json, enum, aiosqlite
+from fastapi.templating import Jinja2Templates
+
 from wiretide.tokens import get_shared_token
 from wiretide.db import DB_PATH
-from wiretide.api.auth import require_login, require_api_token
-from fastapi.templating import Jinja2Templates
+from wiretide.api.auth import require_login, require_api_token, rbac_required
 from wiretide.models import DeviceStatus
-from wiretide.api.auth import rbac_required
-
 
 templates = Jinja2Templates(directory="wiretide/templates")
 router = APIRouter()
 
-# --- Models ---
 class DeviceRegistration(BaseModel):
     hostname: str
     mac: str
@@ -32,14 +26,12 @@ class DeviceType(str, enum.Enum):
     firewall = "firewall"
     access_point = "access_point"
 
-# --- Endpoints ---
 @router.post("/register")
 async def register_device(device: DeviceRegistration, request: Request):
     ip = request.client.host
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT id, status FROM devices WHERE mac = ?", (device.mac,)) as cursor:
             existing = await cursor.fetchone()
-
         if existing:
             device_id, current_status = existing
             new_status = 'waiting' if current_status == 'removed' else current_status
@@ -63,7 +55,7 @@ async def device_status(status: DeviceStatus, request: Request, _: str = Depends
     mac_lower = status.mac.lower()
 
     async with aiosqlite.connect(DB_PATH) as db:
-        # Update basisgegevens in devices
+        # devices
         await db.execute("""
             UPDATE devices
             SET ip = ?, ssh_enabled = ?, last_seen = ?, hostname = ?, status_json = ?
@@ -84,7 +76,21 @@ async def device_status(status: DeviceStatus, request: Request, _: str = Depends
             ntp_synced = bool(status.settings.get("ntp"))
             fw_state = "enabled" if status.settings.get("firewall") else "disabled"
             fw_profile = status.settings.get("firewall_profile")
-            sec_samples = status.settings.get("security_log_samples") or []
+
+            # --- robust maken: forceer lijst ---
+            raw_sec = status.settings.get("security_log_samples", [])
+            sec_samples: list[str] = []
+            if isinstance(raw_sec, list):
+                sec_samples = [str(x) for x in raw_sec]
+            elif isinstance(raw_sec, str):
+                # probeer te parsen als JSON; anders leeg
+                try:
+                    parsed = json.loads(raw_sec)
+                    if isinstance(parsed, list):
+                        sec_samples = [str(x) for x in parsed]
+                except Exception:
+                    sec_samples = []
+            # alles wat geen lijst is -> lege lijst
 
             await db.execute("""
                 INSERT INTO device_status (
@@ -112,13 +118,10 @@ async def device_status(status: DeviceStatus, request: Request, _: str = Depends
                 json.dumps(sec_samples),
                 now
             ))
-
         await db.commit()
-
 
 @router.get("/config")
 async def get_config(request: Request, _: str = Depends(require_api_token)):
-    """Return queued package for an approved device."""
     mac = request.headers.get("X-MAC", "").lower()
     if not mac:
         raise HTTPException(status_code=401)
@@ -154,7 +157,7 @@ async def list_devices(_: str = Depends(require_login)):
             "hostname": row[0],
             "mac": row[1],
             "ip": row[2],
-            "last_seen": (datetime.fromisoformat(row[3]).astimezone(timezone.utc).isoformat().replace("+00:00", "Z")if row[3] else None),
+            "last_seen": (datetime.fromisoformat(row[3]).astimezone(timezone.utc).isoformat().replace("+00:00", "Z") if row[3] else None),
             "status": row[4],
             "ssh_enabled": bool(row[5]),
             "device_type": row[6],
@@ -166,7 +169,6 @@ async def list_devices(_: str = Depends(require_login)):
 async def approve_device(mac: str = Form(...), device_type: str = Form(...), _: str = Depends(require_login)):
     if device_type not in [t.value for t in DeviceType if t != DeviceType.unknown]:
         raise HTTPException(status_code=400, detail="Invalid or missing device type.")
-
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE devices SET approved = 1, status = 'approved', device_type = ? WHERE mac = ?",
@@ -201,9 +203,12 @@ async def device_page(device_type: str, mac: str, request: Request, _: str = Dep
     if device_type not in [t.value for t in DeviceType if t != DeviceType.unknown]:
         raise HTTPException(status_code=404)
 
+    mac_norm = mac.lower()  # ✅ normalize
+
     async with aiosqlite.connect(DB_PATH) as db:
+        # Basis device-info
         cursor = await db.execute(
-            "SELECT hostname, ip, ssh_enabled, device_type FROM devices WHERE mac = ?", (mac,)
+            "SELECT hostname, ip, ssh_enabled, device_type FROM devices WHERE mac = ?", (mac_norm,)
         )
         row = await cursor.fetchone()
         if not row:
@@ -214,23 +219,45 @@ async def device_page(device_type: str, mac: str, request: Request, _: str = Dep
             "ip": row[1],
             "ssh_enabled": bool(row[2]),
             "device_type": row[3],
-            "mac": mac
+            "mac": mac_norm,  # ✅ voorkom nieuwe mismatches in links/UI
         }
 
+        # Live status + extra firewallvelden
         cursor = await db.execute("""
-            SELECT model, wan_ip, dns_servers, ntp_synced, firewall_state, updated_at
-            FROM device_status WHERE mac = ?
-        """, (mac,))
+            SELECT
+              model,
+              wan_ip,
+              dns_servers,
+              ntp_synced,
+              firewall_state,
+              firewall_profile_active,
+              security_log_samples,
+              updated_at
+            FROM device_status
+            WHERE mac = ?
+        """, (mac_norm,))
         settings_row = await cursor.fetchone()
+
         settings = None
         if settings_row:
+            sec_samples = []
+            if settings_row[6]:
+                try:
+                    parsed = json.loads(settings_row[6])
+                    if isinstance(parsed, list):
+                        sec_samples = [str(x) for x in parsed]
+                except Exception:
+                    sec_samples = []
+
             settings = {
                 "model": settings_row[0],
                 "wan_ip": settings_row[1],
                 "dns": json.loads(settings_row[2]) if settings_row[2] else [],
                 "ntp_synced": settings_row[3],
                 "firewall_state": settings_row[4],
-                "updated_at": settings_row[5]
+                "firewall_profile_active": settings_row[5],
+                "security_log_samples": sec_samples,
+                "updated_at": settings_row[7],
             }
 
     return templates.TemplateResponse(f"{device_type}.html", {
@@ -239,18 +266,23 @@ async def device_page(device_type: str, mac: str, request: Request, _: str = Dep
         "settings": settings
     })
 
-@router.post("/api/queue-config")
-async def queue_config(mac: str = Form(...), package_json: str = Form(...), sha256: str = Form(...), _: str = Depends(require_login)):
-    import hashlib
 
+@router.post("/api/queue-config")
+async def queue_config(
+    mac: str = Form(...),
+    package_json: str = Form(...),
+    sha256: str = Form(...),
+    _: str = Depends(require_login)
+):
+    import hashlib
     try:
         package = json.loads(package_json)
     except Exception:
         raise HTTPException(400, detail="Invalid JSON in package")
 
-    # Controleer SHA256
-    calculated = hashlib.sha256(json.dumps(package, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
-
+    calculated = hashlib.sha256(
+        json.dumps(package, sort_keys=True, separators=(',', ':')).encode()
+    ).hexdigest()
     if calculated != sha256:
         raise HTTPException(400, detail="SHA256 mismatch")
 
@@ -266,7 +298,8 @@ async def queue_config(mac: str = Form(...), package_json: str = Form(...), sha2
         await db.execute("""
             INSERT INTO device_configs (mac, config, created_at)
             VALUES (?, ?, ?)
-            ON CONFLICT(mac) DO UPDATE SET config=excluded.config, created_at=excluded.created_at
+            ON CONFLICT(mac) DO UPDATE
+            SET config=excluded.config, created_at=excluded.created_at
         """, (mac, config_blob, datetime.now()))
         await db.commit()
 
@@ -295,12 +328,13 @@ async def get_agent_update_config(request: Request):
             raise HTTPException(status_code=404, detail="Device not found")
         per_device_allowed = bool(row[0])
 
+    # deze helpers bestaan al in je codebase
+    from wiretide.api.settings import get_config_value  # import binnen functie om circulars te vermijden
     updates_enabled = await get_config_value("agent_updates_enabled", "false") == "true"
     update_url = await get_config_value("agent_update_url", "")
     min_supported_version = await get_config_value("min_supported_agent_version", "0.1.0")
 
     allow_update = updates_enabled or per_device_allowed
-
     return {
         "update_available": allow_update,
         "update_url": update_url if allow_update else None,

@@ -67,7 +67,7 @@
     <label class="inline-flex items-center">
       <input type="checkbox" id="sec-enabled" class="mr-2"> Enable security logging
     </label>
-    <div class="grid grid-cols-3 gap-3 mt-2">
+    <div class="grid grid-cols-2 gap-3 mt-2">
       <div>
         <label class="block text-sm">Level</label>
         <select id="sec-level" class="w-full p-2 border rounded dark:bg-gray-700 dark:text-white">
@@ -82,10 +82,6 @@
         <label class="block text-sm">Prefix</label>
         <input id="sec-prefix" value="WTSEC" class="w-full p-2 border rounded dark:bg-gray-700 dark:text-white">
       </div>
-      <div>
-        <label class="block text-sm">Rate</label>
-        <input id="sec-rate" value="10/second" class="w-full p-2 border rounded dark:bg-gray-700 dark:text-white">
-      </div>
     </div>
 
     <button onclick="sendFirewallPackage()" class="mt-4 px-4 py-2 bg-blue-600 text-white rounded">
@@ -95,7 +91,7 @@
     <div class="mt-6">
       <h3 class="text-lg font-semibold">Recent Security Events</h3>
       <pre class="mt-2 p-3 bg-black text-green-200 rounded overflow-auto max-h-64">
-{{ ("\n".join(json.loads(settings.security_log_samples)) if settings and settings.security_log_samples else "(no security events yet)") }}
+{{ ("\n".join(settings.security_log_samples) if settings and settings.security_log_samples else "(no security events yet)") }}
       </pre>
     </div>
 
@@ -107,6 +103,60 @@
 
   </div>
 </div>
+
+<script>
+  function sortObject(o) {
+    if (Array.isArray(o)) return o.map(sortObject);
+    if (o && typeof o === 'object') {
+      return Object.keys(o).sort().reduce((acc, k) => { acc[k] = sortObject(o[k]); return acc; }, {});
+    }
+    return o;
+  }
+  function stableStringify(obj) { return JSON.stringify(sortObject(obj)); }
+
+  async function sendFirewallPackage() {
+    const mac = "{{ device.mac }}";
+    const profile = document.getElementById("firewall-profile").value || undefined;
+    const sec = {
+      enabled: document.getElementById("sec-enabled").checked,
+      level: document.getElementById("sec-level").value,
+      prefix: document.getElementById("sec-prefix").value || "WTSEC",
+    };
+    const pkg = {};
+    if (profile) pkg.firewall_profile = profile;
+    pkg.security_logging = sec;
+
+    const pkgStr = stableStringify(pkg);
+    const sha = await sha256(pkgStr);
+
+    const formData = new FormData();
+    formData.append("mac", mac);
+    formData.append("package_json", pkgStr);
+    formData.append("sha256", sha);
+
+    try {
+      const res = await fetch("/api/queue-config", { method: "POST", body: formData });
+      if (res.ok) {
+        alert("Firewall package queued.");
+      } else {
+        const body = await res.json();
+        let msg = "Unknown error";
+        if (typeof body.detail === "string") msg = body.detail;
+        else if (Array.isArray(body.detail)) msg = body.detail.map(e => e.msg || JSON.stringify(e)).join(", ");
+        else if (typeof body.detail === "object") msg = JSON.stringify(body.detail);
+        alert("Failed: " + msg);
+      }
+    } catch (err) {
+      alert("Network error: " + err);
+    }
+  }
+
+  async function sha256(str) {
+    const buf = new TextEncoder().encode(str);
+    const hash = await crypto.subtle.digest("SHA-256", buf);
+    return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, "0")).join("");
+  }
+</script>
 
 
 <!-- DHCP Tab -->
@@ -141,6 +191,7 @@
 {% endblock %}
 
 {% block scripts %}
+{{ super() }}
 <script>
   function sortObject(o) {
     if (Array.isArray(o)) return o.map(sortObject);
@@ -174,7 +225,6 @@
       enabled: document.getElementById("sec-enabled").checked,
       level: document.getElementById("sec-level").value,
       prefix: document.getElementById("sec-prefix").value || "WTSEC",
-      rate: document.getElementById("sec-rate").value || "10/second",
     };
     const pkg = {};
     if (profile) pkg.firewall_profile = profile;
@@ -247,3 +297,4 @@
   }
 </script>
 {% endblock %}
+

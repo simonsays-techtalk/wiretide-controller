@@ -213,33 +213,35 @@ handle_package() {
   PKG_JSON="$(echo "$RESPONSE" | jq -c '.package')"
   EXPECTED="$(echo "$RESPONSE" | jq -r '.sha256')"
 
+  # niets te doen?
   if [ "$PKG_JSON" = "{}" ] || [ -z "$EXPECTED" ]; then
     return
   fi
 
+  # integriteitscheck (moet gelijk zijn aan controller)
   ACTUAL="$(sha256_json "$PKG_JSON")"
   if [ "$EXPECTED" != "$ACTUAL" ]; then
     log "Package SHA256 mismatch (expected $EXPECTED, got $ACTUAL)"
     return
   fi
 
+  # idem‑potent: als we dit pakket al hebben toegepast, niets doen
+  LAST_SHA_FILE="/etc/wiretide/last_config_sha"
+  mkdir -p /etc/wiretide
+  if [ -f "$LAST_SHA_FILE" ] && [ "$(cat "$LAST_SHA_FILE" 2>/dev/null)" = "$EXPECTED" ]; then
+    return
+  fi
+
   log "Executing config package..."
 
+  # --- Firewall profiel toepassen (fw4 config-bestand kopiëren) ---
   FIREWALL_PROFILE="$(echo "$PKG_JSON" | jq -r '.firewall_profile // empty')"
   if [ -n "$FIREWALL_PROFILE" ]; then
     FILE="/etc/wiretide/profiles/firewall-$FIREWALL_PROFILE.conf"
-    EXPECTED_HASH="$(echo "$RESPONSE" | jq -r '.package_hashes.firewall_profile // empty')"
-    if [ -n "$EXPECTED_HASH" ]; then
-      ACTUAL_HASH="$(sha256sum "$FILE" 2>/dev/null | awk '{print $1}')"
-      if [ "$EXPECTED_HASH" != "$ACTUAL_HASH" ]; then
-        log "Firewall profile hash mismatch ($FIREWALL_PROFILE)"
-        return
-      fi
-    fi
     if [ -f "$FILE" ]; then
       cp "$FILE" /etc/config/firewall
+      uci commit firewall 2>/dev/null || true
       /etc/init.d/firewall restart
-      mkdir -p /etc/wiretide
       echo "$FIREWALL_PROFILE" > /etc/wiretide/fw_active_profile
       log "Applied profile: $FIREWALL_PROFILE"
     else
@@ -247,26 +249,56 @@ handle_package() {
     fi
   fi
 
-  # Nieuw: Security logging
+  # --- Security logging (FW4 only) ---
   SEC_LOG="$(echo "$PKG_JSON" | jq -c '.security_logging // {}')"
   if echo "$SEC_LOG" | jq -e 'to_entries | length > 0' >/dev/null 2>&1; then
-    EN=$(echo "$SEC_LOG" | jq -r '.enabled // false')
-    LVL=$(echo "$SEC_LOG" | jq -r '.level // "info"')
-    PFX=$(echo "$SEC_LOG" | jq -r '.prefix // "WTSEC"')
-    RATE=$(echo "$SEC_LOG" | jq -r '.rate // "10/second"')
+    EN="$(echo "$SEC_LOG" | jq -r '.enabled // false')"
+    LVL="$(echo "$SEC_LOG" | jq -r '.level // "info"')"
+    PFX="$(echo "$SEC_LOG" | jq -r '.prefix // "WTSEC"')"
 
-    uci set firewall.@defaults[0].log="$([ "$EN" = "true" ] && echo 1 || echo 0)"
-    uci set firewall.@defaults[0].log_level="$LVL"
-    uci set firewall.@defaults[0].log_limit="$RATE"
-    uci set firewall.@defaults[0].log_prefix="$PFX"
-    uci commit firewall
+    echo "$PFX" > /etc/wiretide/fw_log_prefix
+    echo "$EN"  > /etc/wiretide/fw_log_enabled
+    echo "$LVL" > /etc/wiretide/fw_log_level
+
+    # purge bestaande WTSEC-logregels (veilig, idempotent)
+    _fw4_purge_log_rules() {
+      want_prefix="$1"
+      # loop indices achteruit om delete-ops veilig te doen
+      for i in $(uci show firewall 2>/dev/null | grep -o 'firewall\.@rule\[[0-9]\+\]' | sed 's/.*\[//;s/\]//' | sort -nr); do
+        extra="$(uci -q get firewall.@rule[$i].extra)"
+        name="$(uci -q get firewall.@rule[$i].name)"
+        case "$extra $name" in
+          *"log prefix"*"$want_prefix"*|*"Wiretide Security Log"*)
+            uci delete firewall.@rule[$i]
+            ;;
+        esac
+      done
+    }
+
+    _fw4_purge_log_rules "$PFX"
+
+    if [ "$EN" = "true" ]; then
+      # veilige default: alleen loggen (geen drop) op hoge testpoort vanaf LAN
+      uci add firewall rule >/dev/null
+      uci set firewall.@rule[-1].name='Wiretide Security Log'
+      uci set firewall.@rule[-1].src='lan'
+      uci set firewall.@rule[-1].proto='tcp'
+      uci set firewall.@rule[-1].dest_port='65000'
+      uci set firewall.@rule[-1].target='accept'
+      uci set firewall.@rule[-1].extra="log prefix \"$PFX\" level $LVL"
+      log "FW4 security logging enabled (prefix=$PFX level=$LVL)"
+    else
+      log "FW4 security logging disabled"
+    fi
+
+    uci commit firewall 2>/dev/null || true
     /etc/init.d/firewall restart
 
-    mkdir -p /etc/wiretide
-    echo "$PFX" > /etc/wiretide/fw_log_prefix
-    log "Applied security logging: enabled=$EN level=$LVL prefix=$PFX rate=$RATE"
+    # synthetische testlog zodat de controller meteen samples ziet
+    logger "${PFX} TEST: security logging path OK (prefix ${PFX}, level ${LVL})"
   fi
 
+  # --- Apps installeren (ongewijzigd) ---
   opkg update
   echo "$PKG_JSON" | jq -r '.apps[]?' | while IFS= read -r app; do
     if [ -n "$(opkg list-installed "$app" 2>/dev/null)" ]; then
@@ -282,12 +314,49 @@ handle_package() {
     fi
   done
 
+  # markeer toegepast pakket voor idempotentie
+  echo "$EXPECTED" > "$LAST_SHA_FILE"
+}
+
+  # --- DHCP config toepassen (ongewijzigd) ---
+  DHCP_CONFIG="$(echo "$PKG_JSON" | jq -c '.dhcp // {}')"
+  if echo "$DHCP_CONFIG" | jq -e 'to_entries | length > 0' >/dev/null 2>&1; then
+    echo "$DHCP_CONFIG" | jq -r 'to_entries[] | "uci set dhcp.@dnsmasq[0].\(.key)=\"\(.value)\""' | sh
+    uci commit dhcp && /etc/init.d/dnsmasq restart && log "DHCP config updated"
+  fi
+
+  # markeer pakket als toegepast
+  echo "$EXPECTED" > "$LAST_SHA_FILE"
+
+  # versneld terugmelden (niet wachten op INTERVAL)
+  send_status || true
+}
+
+
+  # --- Apps installeren ---
+  opkg update
+  echo "$PKG_JSON" | jq -r '.apps[]?' | while IFS= read -r app; do
+    if [ -n "$(opkg list-installed "$app" 2>/dev/null)" ]; then
+      log "$app already installed"
+    else
+      log "Installing app: $app"
+      if opkg install "$app"; then
+        VERSION="$(opkg list-installed "$app" | awk '{print $3}')"
+        log "Installed: $app (version $VERSION)"
+      else
+        log "Failed to install: $app"
+      fi
+    fi
+  done
+
+  # --- DHCP config toepassen ---
   DHCP_CONFIG="$(echo "$PKG_JSON" | jq -c '.dhcp // {}')"
   if echo "$DHCP_CONFIG" | jq -e 'to_entries | length > 0' >/dev/null 2>&1; then
     echo "$DHCP_CONFIG" | jq -r 'to_entries[] | "uci set dhcp.@dnsmasq[0].\(.key)=\"\(.value)\""' | sh
     uci commit dhcp && /etc/init.d/dnsmasq restart && log "DHCP config updated"
   fi
 }
+
 
 log "Starting Wiretide agent (Controller: $CONTROLLER_URL, MAC: $MAC)"
 register_device
