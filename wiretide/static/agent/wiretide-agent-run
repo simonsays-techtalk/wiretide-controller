@@ -1,13 +1,13 @@
 #!/bin/sh
 # Wiretide Agent – resilient loop + firewall logging + timeouts
-# Version: 2025.08.10-fwsec2
+# Version: 2025.08.10-fwsec6
 # Target: OpenWrt BusyBox / ash
 
 # =============================
 # Config & defaults
 # =============================
-VERSION="Wiretide Agent v2025.08.10+fwsec2"
-LOG_FILES="/var/wiretide-debug.log /tmp/wiretide-debug.log"
+VERSION="Wiretide Agent v2025.08.10+fwsec4"
+LOG_FILE="/tmp/wiretide-debug.log"
 INTERVAL="${INTERVAL:-60}"
 CA_CERT="${CA_CERT:-/etc/wiretide-ca.crt}"
 CTRL_FILE="/etc/wiretide-controller"
@@ -26,9 +26,7 @@ CURL_OPTS_COMMON="-s --connect-timeout 5 --max-time 15"
 # =============================
 log() {
   ts="[$(date '+%Y-%m-%d %H:%M:%S')]"
-  for f in $LOG_FILES; do
-    echo "$ts $*" >> "$f"
-  done
+  echo "$ts $*" >> "$LOG_FILE"
 }
 
 normalize_mac() { echo "$1" | tr 'A-F' 'a-f'; }
@@ -83,10 +81,26 @@ json_escape() { sed 's/\\/\\\\/g; s/"/\\"/g'; }
 
 security_log_samples_json() {
   prefix="$(cat "$FW_PREFIX_FILE" 2>/dev/null)"; [ -n "$prefix" ] || prefix="$SEC_PREFIX_DEFAULT"
-  # last 20 lines containing prefix
-  logread -l 200 2>/dev/null | grep "$prefix" | tail -n 20 | while IFS= read -r line; do
-    printf '"%s",' "$(echo "$line" | json_escape)"
-  done | sed 's/,$//; s/^$/\n/' | sed '1s/^/[/' | sed '$s/$/]/'
+  if command -v jq >/dev/null 2>&1; then
+    # Use jq to safely convert lines to JSON array, last 20 entries
+    logread -l 400 2>/dev/null | grep "$prefix" | tail -n 20 | jq -R -s 'split("
+") | map(select(length>0))'
+  else
+    # Fallback without sed tricks
+    tmp="/tmp/wtsec-lines.$$"
+    logread -l 400 2>/dev/null | grep "$prefix" | tail -n 20 > "$tmp" 2>/dev/null || true
+    printf '['
+    i=0
+    while IFS= read -r line; do
+      # escape backslash and quotes
+      esc="$(printf '%s' "$line" | awk 'BEGIN{ORS=""} {gsub(/\/,"\\"); gsub(/"/,"\\""); print}')"
+      [ $i -gt 0 ] && printf ','
+      printf '"%s"' "$esc"
+      i=$((i+1))
+    done < "$tmp"
+    printf ']'
+    rm -f "$tmp"
+  fi
 }
 
 stable_json_sha256() {
@@ -142,22 +156,27 @@ build_status_payload() {
 
   wan_ip="$(get_wan_ip)"; lan_ip="$(get_lan_ip)"
   model="$(cat /tmp/sysinfo/model 2>/dev/null)"; [ -n "$model" ] || model="unknown"
-  ntp_synced="$(is_ntp_synced)"
-  fw_state="active"
-  fw_profile_active="$(cat "$FW_PROFILE_FILE" 2>/dev/null)"
+  ntp_ok="$(is_ntp_synced)"
+  fw_profile_active="$(cat "$FW_PROFILE_FILE" 2>/dev/null | tr -d '
+')"
+  [ -n "$fw_profile_active" ] || fw_profile_active="unknown"
 
+  # Server expects a 'settings' object; keys: model, wan_ip, dns, ntp, firewall, firewall_profile, security_log_samples
   cat <<JSON
 {
   "mac": "$MAC",
   "hostname": "$HOSTNAME",
   "device_type": "$DEVICE_TYPE",
-  "model": "$(echo "$model" | json_escape)",
-  "wan_ip": "$(echo "$wan_ip" | json_escape)",
-  "dns_servers": $dns_json,
-  "ntp_synced": $ntp_synced,
-  "firewall_state": "$(echo "$fw_state" | json_escape)",
-  "firewall_profile_active": "$(echo "$fw_profile_active" | json_escape)",
-  "security_log_samples": $sec_json
+  "ssh_enabled": $ssh_enabled,
+  "settings": {
+    "model": "$(echo "$model" | json_escape)",
+    "wan_ip": "$(echo "$wan_ip" | json_escape)",
+    "dns": $dns_json,
+    "ntp": $ntp_ok,
+    "firewall": true,
+    "firewall_profile": "$(echo "$fw_profile_active" | json_escape)",
+    "security_log_samples": $sec_json
+  }
 }
 JSON
 }
@@ -182,42 +201,39 @@ apply_firewall_profile() {
   prof="$1"
   [ -n "$prof" ] || return 0
   echo "$prof" > "$FW_PROFILE_FILE"
+  sync
   log "Applied firewall profile: $prof (saved to $FW_PROFILE_FILE)"
 }
 
 ensure_security_logging_rule() {
   enabled="$1"; level="$2"; prefix="$3"
-  # Persist prefix
   [ -n "$prefix" ] && { echo "$prefix" > "$FW_PREFIX_FILE"; SEC_PREFIX="$prefix"; }
 
+  # Cleanup legacy options and stale rules
+  uci -q delete firewall.wtsec_log.extra >/dev/null 2>&1 || true
+  # also remove any anonymous rule using old fw3 extra option
+  for opt in $(uci show firewall | awk -F'=' '/\.extra=/{print $1}'); do uci -q delete "$opt"; done
+
   if [ "$enabled" = "true" ]; then
-    # Create/update a firewall rule that logs input traffic; conservative defaults
-    uci -q show firewall.wtsec_log >/dev/null 2>&1 || uci set firewall.wtsec_log="rule"
-    uci set firewall.wtsec_log.name="Wiretide Security Log"
-    uci set firewall.wtsec_log.src="lan"
-    uci set firewall.wtsec_log.target="LOG"
-    uci set firewall.wtsec_log.proto="all"
-    uci set firewall.wtsec_log.family="any"
-    uci set firewall.wtsec_log.enabled="1"
-    uci set firewall.wtsec_log.limit="10/second"
-    uci set firewall.wtsec_log.log_prefix="$SEC_PREFIX"
-    # Map level roughly; OpenWrt fw4 uses kernel log levels (0..7)
-    case "$level" in
-      debug)  uci set firewall.wtsec_log.log_level="7";;
-      info)   uci set firewall.wtsec_log.log_level="6";;
-      notice) uci set firewall.wtsec_log.log_level="5";;
-      warn)   uci set firewall.wtsec_log.log_level="4";;
-      err)    uci set firewall.wtsec_log.log_level="3";;
-      *)      uci set firewall.wtsec_log.log_level="6";;
-    esac
+    uci -q delete firewall.wtsec_log
+    uci set firewall.wtsec_log='rule'
+    uci set firewall.wtsec_log.name='Wiretide Security Log'
+    uci set firewall.wtsec_log.src='lan'
+    uci set firewall.wtsec_log.proto='all'
+    uci set firewall.wtsec_log.enabled='1'
+    uci set firewall.wtsec_log.limit='10/second'
+
+    # fw4: use 'log' with a string to set prefix; no log_prefix/log_level
+    uci set firewall.wtsec_log.log="${SEC_PREFIX} "
+    uci set firewall.wtsec_log.target='ACCEPT'
+
     uci commit firewall
     /etc/init.d/firewall reload >/dev/null 2>&1 || /etc/init.d/firewall restart >/dev/null 2>&1
-    logger "$SEC_PREFIX TEST: security logging active (level=$level)"
-    log "Security logging enabled (prefix=$SEC_PREFIX, level=$level)"
+    logger "${SEC_PREFIX} TEST: security logging active"
+    log "Security logging enabled (fw4 compliant, prefix=$SEC_PREFIX)"
   else
-    # Disable rule if present
     if uci -q show firewall.wtsec_log >/dev/null 2>&1; then
-      uci set firewall.wtsec_log.enabled="0"
+      uci set firewall.wtsec_log.enabled='0'
       uci commit firewall
       /etc/init.d/firewall reload >/dev/null 2>&1 || true
     fi

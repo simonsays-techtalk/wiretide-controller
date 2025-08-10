@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel
 from datetime import timezone, datetime
 import json, enum, aiosqlite
+from fastapi import Body
 from fastapi.templating import Jinja2Templates
 
 from wiretide.tokens import get_shared_token
@@ -49,76 +50,85 @@ async def register_device(device: DeviceRegistration, request: Request):
     return {"status": "ok"}
 
 @router.post("/status")
-async def device_status(status: DeviceStatus, request: Request, _: str = Depends(require_api_token)):
-    client_ip = request.client.host
-    now = datetime.now()
-    mac_lower = status.mac.lower()
+async def accept_status(payload: dict = Body(...)):
+    # Accept both agents: old (flat) and new (nested under settings)
+    mac = (payload.get("mac") or "").lower()
+    if not mac:
+        return JSONResponse({"error": "missing mac"}, status_code=400)
+
+    s = payload.get("settings") or {}
+
+    def pick(*keys, default=None):
+        for k in keys:
+            if k in s and s[k] not in (None, ""):
+                return s[k]
+            if k in payload and payload[k] not in (None, ""):
+                return payload[k]
+        return default
+
+    model = pick("model", default="unknown")
+    wan_ip = pick("wan_ip", "wan")
+    dns   = pick("dns", "dns_servers", default=[])
+    ntp   = pick("ntp", "ntp_synced", default=False)
+    fw_state = pick("firewall", "firewall_state", default="active")
+    fw_prof  = pick("firewall_profile", "firewall_profile_active", default=None)
+    sec_raw  = pick("security_log_samples", default=[])
+
+    # Normalize DNS to JSON list
+    if isinstance(dns, str):
+        try:
+            maybe = json.loads(dns)
+            dns_list = maybe if isinstance(maybe, list) else [dns]
+        except Exception:
+            dns_list = [x.strip() for x in dns.split(',') if x.strip()]
+    elif isinstance(dns, list):
+        dns_list = [str(x) for x in dns]
+    else:
+        dns_list = []
+
+    # Normalize security logs to JSON list of strings (max 50 items)
+    sec_list = []
+    if isinstance(sec_raw, list):
+        sec_list = [str(x) for x in sec_raw][-50:]
+    elif isinstance(sec_raw, str):
+        sec_list = [ln for ln in sec_raw.splitlines() if ln.strip()][-50:]
+    else:
+        sec_list = []
+
+    updated_at = datetime.now(timezone.utc).isoformat()
 
     async with aiosqlite.connect(DB_PATH) as db:
-        # devices
-        await db.execute("""
-            UPDATE devices
-            SET ip = ?, ssh_enabled = ?, last_seen = ?, hostname = ?, status_json = ?
-            WHERE mac = ? AND status != 'removed'
-        """, (
-            client_ip,
-            status.ssh_enabled,
-            now,
-            status.hostname,
-            json.dumps(status.dict()),
-            mac_lower
-        ))
-
-        if status.settings:
-            model = status.settings.get("model")
-            wan_ip = status.settings.get("wan_ip") or status.settings.get("device_ip") or ""
-            dns = status.settings.get("dns") or []
-            ntp_synced = bool(status.settings.get("ntp"))
-            fw_state = "enabled" if status.settings.get("firewall") else "disabled"
-            fw_profile = status.settings.get("firewall_profile")
-
-            # --- robust maken: forceer lijst ---
-            raw_sec = status.settings.get("security_log_samples", [])
-            sec_samples: list[str] = []
-            if isinstance(raw_sec, list):
-                sec_samples = [str(x) for x in raw_sec]
-            elif isinstance(raw_sec, str):
-                # probeer te parsen als JSON; anders leeg
-                try:
-                    parsed = json.loads(raw_sec)
-                    if isinstance(parsed, list):
-                        sec_samples = [str(x) for x in parsed]
-                except Exception:
-                    sec_samples = []
-            # alles wat geen lijst is -> lege lijst
-
-            await db.execute("""
-                INSERT INTO device_status (
-                    mac, model, wan_ip, dns_servers, ntp_synced, firewall_state,
-                    firewall_profile_active, security_log_samples, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(mac) DO UPDATE SET
-                  model = excluded.model,
-                  wan_ip = excluded.wan_ip,
-                  dns_servers = excluded.dns_servers,
-                  ntp_synced = excluded.ntp_synced,
-                  firewall_state = excluded.firewall_state,
-                  firewall_profile_active = excluded.firewall_profile_active,
-                  security_log_samples = excluded.security_log_samples,
-                  updated_at = excluded.updated_at
-            """, (
-                mac_lower,
-                model,
-                wan_ip,
-                json.dumps(dns),
-                ntp_synced,
-                fw_state,
-                fw_profile,
-                json.dumps(sec_samples),
-                now
-            ))
+        await db.execute(
+            """
+            INSERT INTO device_status (
+                mac, model, wan_ip, dns_servers, ntp_synced, firewall_state,
+                firewall_profile_active, security_log_samples, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(mac) DO UPDATE SET
+                model=excluded.model,
+                wan_ip=excluded.wan_ip,
+                dns_servers=excluded.dns_servers,
+                ntp_synced=excluded.ntp_synced,
+                firewall_state=excluded.firewall_state,
+                firewall_profile_active=excluded.firewall_profile_active,
+                security_log_samples=excluded.security_log_samples,
+                updated_at=excluded.updated_at
+            """,
+            (
+                mac,
+                str(model) if model is not None else None,
+                str(wan_ip) if wan_ip is not None else None,
+                json.dumps(dns_list),
+                1 if ntp else 0,
+                str(fw_state) if fw_state is not None else None,
+                str(fw_prof) if fw_prof is not None else None,
+                json.dumps(sec_list),
+                updated_at,
+            ),
+        )
         await db.commit()
+
+    return {"status": "ok", "mac": mac, "events": len(sec_list)}
 
 @router.get("/config")
 async def get_config(request: Request, _: str = Depends(require_api_token)):
@@ -243,19 +253,40 @@ async def device_page(device_type: str, mac: str, request: Request, _: str = Dep
 
         settings = None
         if settings_row:
+            # Robust parse for security_log_samples: JSON list OR newline-delimited text OR single string
             sec_samples = []
-            if settings_row[6]:
+            raw_sec = settings_row[6]
+            if raw_sec:
                 try:
-                    parsed = json.loads(settings_row[6])
+                    parsed = json.loads(raw_sec)
                     if isinstance(parsed, list):
                         sec_samples = [str(x) for x in parsed]
+                    elif isinstance(parsed, str):
+                        s = parsed.strip()
+                        if s:
+                            sec_samples = s.splitlines()
                 except Exception:
-                    sec_samples = []
+                    # Not JSON – treat as plaintext blob
+                    try:
+                        sec_samples = [ln for ln in str(raw_sec).splitlines() if ln.strip()]
+                    except Exception:
+                        sec_samples = []
+
+            # dns_servers may be JSON or CSV/plaintext; support both
+            dns_field = settings_row[2]
+            dns_list = []
+            if dns_field:
+                try:
+                    dns_list = json.loads(dns_field)
+                    if not isinstance(dns_list, list):
+                        dns_list = [str(dns_field)]
+                except Exception:
+                    dns_list = [s.strip() for s in str(dns_field).split(',') if s.strip()]
 
             settings = {
                 "model": settings_row[0],
                 "wan_ip": settings_row[1],
-                "dns": json.loads(settings_row[2]) if settings_row[2] else [],
+                "dns": dns_list,
                 "ntp_synced": settings_row[3],
                 "firewall_state": settings_row[4],
                 "firewall_profile_active": settings_row[5],
@@ -298,6 +329,7 @@ async def device_page(device_type: str, mac: str, request: Request, _: str = Dep
             "ui_defaults": ui_defaults,
         },
     )
+    
 @router.post("/api/queue-config")
 async def queue_config(
     mac: str = Form(...),
