@@ -203,7 +203,7 @@ async def device_page(device_type: str, mac: str, request: Request, _: str = Dep
     if device_type not in [t.value for t in DeviceType if t != DeviceType.unknown]:
         raise HTTPException(status_code=404)
 
-    mac_norm = mac.lower()  # ✅ normalize
+    mac_norm = mac.lower()
 
     async with aiosqlite.connect(DB_PATH) as db:
         # Basis device-info
@@ -219,11 +219,12 @@ async def device_page(device_type: str, mac: str, request: Request, _: str = Dep
             "ip": row[1],
             "ssh_enabled": bool(row[2]),
             "device_type": row[3],
-            "mac": mac_norm,  # ✅ voorkom nieuwe mismatches in links/UI
+            "mac": mac_norm,
         }
 
         # Live status + extra firewallvelden
-        cursor = await db.execute("""
+        cursor = await db.execute(
+            """
             SELECT
               model,
               wan_ip,
@@ -235,7 +236,9 @@ async def device_page(device_type: str, mac: str, request: Request, _: str = Dep
               updated_at
             FROM device_status
             WHERE mac = ?
-        """, (mac_norm,))
+            """,
+            (mac_norm,),
+        )
         settings_row = await cursor.fetchone()
 
         settings = None
@@ -260,13 +263,41 @@ async def device_page(device_type: str, mac: str, request: Request, _: str = Dep
                 "updated_at": settings_row[7],
             }
 
-    return templates.TemplateResponse(f"{device_type}.html", {
-        "request": request,
-        "device": device,
-        "settings": settings
-    })
+        # Nieuw: defaults voor de UI uit de laatst gequeue'de config
+        ui_defaults = {
+            "firewall_profile_requested": None,
+            "sec_enabled": False,
+            "sec_level": "info",
+            "sec_prefix": "WTSEC",
+        }
+        cursor = await db.execute(
+            "SELECT config FROM device_configs WHERE mac = ? ORDER BY created_at DESC LIMIT 1",
+            (mac_norm,),
+        )
+        row = await cursor.fetchone()
+        if row and row[0]:
+            try:
+                cfg = json.loads(row[0])  # {"package": {...}, "sha256": "..."}
+                pkg = (cfg.get("package") or {})
+                sl = pkg.get("security_logging") or {}
+                ui_defaults = {
+                    "firewall_profile_requested": pkg.get("firewall_profile"),
+                    "sec_enabled": bool(sl.get("enabled", False)),
+                    "sec_level": sl.get("level", "info"),
+                    "sec_prefix": sl.get("prefix", "WTSEC"),
+                }
+            except Exception:
+                pass
 
-
+    return templates.TemplateResponse(
+        f"{device_type}.html",
+        {
+            "request": request,
+            "device": device,
+            "settings": settings,
+            "ui_defaults": ui_defaults,
+        },
+    )
 @router.post("/api/queue-config")
 async def queue_config(
     mac: str = Form(...),

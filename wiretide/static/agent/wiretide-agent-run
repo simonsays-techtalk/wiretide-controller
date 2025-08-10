@@ -1,380 +1,272 @@
 #!/bin/sh
+# Wiretide Agent – resilient loop + firewall logging + timeouts
+# Version: 2025.08.10-fwsec2
+# Target: OpenWrt BusyBox / ash
 
-# Wiretide Agent (Hybrid + Hostname Debug Logging + Task Execution + Firewall/Security Logging Support)
-VERSION="Wiretide Agent v2025.08.08+fwsec"
-
-# Kill any other running copies (self-cleanup)
-for pid in $(ps w | grep '[w]iretide-agent-run' | awk '{print $1}'); do
-    [ "$pid" != "$$" ] && kill -9 "$pid" 2>/dev/null
-done
-
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting $VERSION (PID $$)" >> /tmp/wiretide-debug.log
-
-CONTROLLER_URL="$(cat /etc/wiretide-controller 2>/dev/null || echo 'https://127.0.0.1')"
-CA_CERT="/etc/wiretide-ca.crt"
+# =============================
+# Config & defaults
+# =============================
+VERSION="Wiretide Agent v2025.08.10+fwsec2"
+LOG_FILES="/var/wiretide-debug.log /tmp/wiretide-debug.log"
+INTERVAL="${INTERVAL:-60}"
+CA_CERT="${CA_CERT:-/etc/wiretide-ca.crt}"
+CTRL_FILE="/etc/wiretide-controller"
 TOKEN_FILE="/etc/wiretide-token"
-INTERVAL=60
-POLL_DELAY=10
-DEBUG_LOG="/tmp/wiretide-debug.log"
-PAYLOAD_FILE="/tmp/wiretide-last-payload.json"
-DHCP_DEBUG="/tmp/wiretide-hostname-debug.txt"
+CONF_FILE="/etc/wiretide/agent.conf"  # optional key=value overrides
+FW_PROFILE_FILE="/etc/wiretide/firewall_profile_active"
+FW_PREFIX_FILE="/etc/wiretide/fw_log_prefix"
+SEC_PREFIX_DEFAULT="WTSEC"
 
-NOW_YEAR="$(date +%Y)"
-if [ "$NOW_YEAR" -lt 2020 ]; then
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠️  System clock appears invalid (year: $NOW_YEAR), TLS may fail" >> "$DEBUG_LOG"
+# curl safety options (short, strict, with timeouts)
+CURL_OPTS_COMMON="-s --connect-timeout 5 --max-time 15"
+[ -s "$CA_CERT" ] && CURL_OPTS_COMMON="$CURL_OPTS_COMMON --cacert $CA_CERT"
+
+# =============================
+# Helpers
+# =============================
+log() {
+  ts="[$(date '+%Y-%m-%d %H:%M:%S')]"
+  for f in $LOG_FILES; do
+    echo "$ts $*" >> "$f"
+  done
+}
+
+normalize_mac() { echo "$1" | tr 'A-F' 'a-f'; }
+
+val_or_default() { [ -n "$1" ] && echo "$1" || echo "$2"; }
+
+read_conf_if_exists() {
+  [ -s "$CONF_FILE" ] || return 0
+  # shellcheck disable=SC1090
+  . "$CONF_FILE" 2>/dev/null || true
+}
+
+get_mac() {
+  # 1) From config var MAC, 2) UCI lan, 3) br-lan, 4) eth0
+  if [ -n "$MAC" ]; then echo "$(normalize_mac "$MAC")"; return; fi
+  mac="$(uci -q get network.lan.macaddr 2>/dev/null)"; [ -n "$mac" ] && { echo "$(normalize_mac "$mac")"; return; }
+  [ -r /sys/class/net/br-lan/address ] && { cat /sys/class/net/br-lan/address; return; }
+  ip link show dev eth0 2>/dev/null | awk '/ether/{print $2; exit}';
+}
+
+get_hostname() {
+  uci -q get system.@system[0].hostname 2>/dev/null || uname -n
+}
+
+get_lan_ip() {
+  ip -4 addr show br-lan 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -n1
+}
+
+get_wan_ip() {
+  # Try the outbound interface, then a direct query on wan
+  dev="$(ip route get 1.1.1.1 2>/dev/null | awk '/dev/{for(i=1;i<=NF;i++){if($i=="dev"){print $(i+1); exit}}}')"
+  [ -n "$dev" ] && ip -4 addr show "$dev" 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -n1 && return
+  wanif="$(uci -q get network.wan.ifname 2>/dev/null)"
+  [ -n "$wanif" ] && ip -4 addr show "$wanif" 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -n1
+}
+
+get_dns_list() {
+  if [ -s /tmp/resolv.conf.d/resolv.conf.auto ]; then
+    awk '/^nameserver/{print $2}' /tmp/resolv.conf.d/resolv.conf.auto | tr '\n' ',' | sed 's/,$//'
+  else
+    awk '/^nameserver/{print $2}' /tmp/resolv.conf | tr '\n' ',' | sed 's/,$//'
+  fi
+}
+
+is_ntp_synced() {
+  # Best-effort; avoid blocking calls. Consider synced if time is > 2020.
+  year=$(date +%Y 2>/dev/null)
+  if [ "$year" -ge 2020 ]; then echo true; else echo false; fi
+}
+
+json_escape() { sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+security_log_samples_json() {
+  prefix="$(cat "$FW_PREFIX_FILE" 2>/dev/null)"; [ -n "$prefix" ] || prefix="$SEC_PREFIX_DEFAULT"
+  # last 20 lines containing prefix
+  logread -l 200 2>/dev/null | grep "$prefix" | tail -n 20 | while IFS= read -r line; do
+    printf '"%s",' "$(echo "$line" | json_escape)"
+  done | sed 's/,$//; s/^$/\n/' | sed '1s/^/[/' | sed '$s/$/]/'
+}
+
+stable_json_sha256() {
+  # requires jq and sha256sum
+  printf '%s' "$1" | jq -S -c . 2>/dev/null | tr -d '\n' | sha256sum | awk '{print $1}'
+}
+
+# =============================
+# Single instance guard
+# =============================
+lockfile="/var/run/wiretide-agent.lock"
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$lockfile"
+  if ! flock -n 9; then
+    log "Another instance is running; exiting"
+    exit 0
+  fi
+else
+  if [ -e "$lockfile" ]; then
+    oldpid=$(cat "$lockfile" 2>/dev/null)
+    [ -n "$oldpid" ] && kill -0 "$oldpid" 2>/dev/null && { log "Instance $oldpid active; exiting"; exit 0; }
+  fi
+  echo $$ > "$lockfile"
 fi
 
-IFACE=""
-[ -d /sys/class/net/br-lan ] && IFACE="br-lan"
-[ -z "$IFACE" ] && IFACE="$(ip route | awk '/default/ {print $5}' | head -n1)"
-[ -z "$IFACE" ] && IFACE="$(ip -o link show | awk -F': ' '/state UP/ && $2!="lo"{print $2;exit}')"
-MAC="$(ip link show "$IFACE" 2>/dev/null | awk '/ether/ {print tolower($2)}')"
-DEVICE_IP="$(ip -4 addr show "$IFACE" 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1)"
-MODEL="$(cat /tmp/sysinfo/model 2>/dev/null)"
-FPR="$(dropbearkey -y -f /etc/dropbear/dropbear_rsa_host_key 2>/dev/null | awk -F': ' '/Fingerprint/ {print $2}')"
-HOSTNAME="$(uci get system.@system[0].hostname 2>/dev/null || hostname 2>/dev/null)"
-[ -z "$HOSTNAME" ] && HOSTNAME="$MAC"
+# =============================
+# Bootstrap
+# =============================
+read_conf_if_exists
+CONTROLLER_URL="$(cat "$CTRL_FILE" 2>/dev/null)"
+[ -n "$CONTROLLER_URL" ] || CONTROLLER_URL="https://127.0.0.1"
+TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)"
+MAC="$(get_mac)"; MAC="$(normalize_mac "$MAC")"
+HOSTNAME="$(get_hostname)"
+DEVICE_TYPE="${DEVICE_TYPE:-router}"
+SEC_PREFIX="$(cat "$FW_PREFIX_FILE" 2>/dev/null)"; [ -n "$SEC_PREFIX" ] || SEC_PREFIX="$SEC_PREFIX_DEFAULT"
 
-log() {
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$DEBUG_LOG"
-}
+log "Starting $VERSION (PID $$)"
+log "Controller=$CONTROLLER_URL, MAC=$MAC, Hostname=$HOSTNAME, Interval=${INTERVAL}s"
 
-normalize_mac() {
-  echo "$1" | tr 'A-F' 'a-f'
-}
+# =============================
+# Status payload
+# =============================
+build_status_payload() {
+  ssh_enabled=false
+  pgrep dropbear >/dev/null 2>&1 && [ -s /etc/dropbear/dropbear_rsa_host_key ] && ssh_enabled=true
 
-lookup_dhcp() {
-  mac="$(normalize_mac "$1")"
-  awk -v mac="$mac" 'tolower($2)==mac {hn=$4; if(hn=="*"||hn=="")hn="unknown"; print $3","hn; exit}' /tmp/dhcp.leases 2>/dev/null
-}
+  dns_csv="$(get_dns_list)"
+  dns_json="[]"
+  [ -n "$dns_csv" ] && dns_json="[\"$(echo "$dns_csv" | sed 's/,/\",\"/g')\"]"
 
-find_interface() {
-  mac="$(normalize_mac "$1")"
-  for ifc in $(iw dev 2>/dev/null | awk '/Interface/{print $2}'); do
-    iw dev "$ifc" station dump 2>/dev/null | grep -qi "$mac" && { echo "$ifc"; return; }
-  done
-  brctl showmacs br-lan 2>/dev/null | awk -v mac="$mac" '{print tolower($1)}' | grep -q "$mac" && { echo "br-lan"; return; }
-  echo "unknown"
-}
+  sec_json="$(security_log_samples_json)"; [ -n "$sec_json" ] || sec_json="[]"
 
-sha256_json() {
-  echo "$1" | jq -S -c . | sed 's/: /:/g' | tr -d '\n' | sha256sum | awk '{print $1}'
-}
+  wan_ip="$(get_wan_ip)"; lan_ip="$(get_lan_ip)"
+  model="$(cat /tmp/sysinfo/model 2>/dev/null)"; [ -n "$model" ] || model="unknown"
+  ntp_synced="$(is_ntp_synced)"
+  fw_state="active"
+  fw_profile_active="$(cat "$FW_PROFILE_FILE" 2>/dev/null)"
 
-build_payload() {
-  SSH_ENABLED=false
-  pgrep dropbear >/dev/null && [ -s /etc/dropbear/dropbear_rsa_host_key ] && SSH_ENABLED=true
-
-  DNS_RAW="$(uci get dhcp.@dnsmasq[0].server 2>/dev/null || grep '^nameserver' /tmp/resolv.conf | awk '{print $2}')"
-  DNS_LIST=""
-  for ip in $DNS_RAW; do
-    ip="$(echo "$ip" | tr -d '"')"
-    [ -n "$DNS_LIST" ] && DNS_LIST="$DNS_LIST, \"$ip\"" || DNS_LIST="\"$ip\""
-  done
-
-  /etc/init.d/firewall enabled && /etc/init.d/firewall status >/dev/null && FIREWALL=true || FIREWALL=false
-  NTP="$(uci get system.ntp.enabled 2>/dev/null || echo false)"
-
-  # Nieuw: actieve firewall-profiel en logprefix uitlezen
-  ACTIVE_PROFILE="$(cat /etc/wiretide/fw_active_profile 2>/dev/null)"
-  LOG_PREF="$(cat /etc/wiretide/fw_log_prefix 2>/dev/null || echo WTSEC)"
-  # Laatste 20 regels security logs
-  SEC_LINES="$(logread -l 200 2>/dev/null | grep "$LOG_PREF" | tail -n 20 | sed 's/"/\\"/g')"
-  SEC_JSON="$(printf '%s\n' "$SEC_LINES" | awk 'BEGIN{print "["}{gsub(/\r/,""); printf (NR>1?",":""); printf "\"%s\"", $0} END{print "]"}')"
-
-  CLIENTS=""
-  SEEN="/tmp/wt-seen-macs"; > "$SEEN"
-  awk '{printf "DHCP: MAC=%s HOST=%s\n", tolower($2), $4}' /tmp/dhcp.leases > "$DHCP_DEBUG"
-
-  add_client() {
-    mac="$(normalize_mac "$1")"; ip="$2"; hn="$3"; ifc="$4"; via="$5"
-    echo "$mac" | grep -Eq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' || return
-    [ -n "$CLIENTS" ] && CLIENTS="$CLIENTS,"
-    CLIENTS="$CLIENTS{ \"mac\":\"$mac\",\"ip\":\"$ip\",\"hostname\":\"$hn\",\"interface\":\"$ifc\",\"connected_via\":\"$via\",\"rx_bytes\":0,\"tx_bytes\":0 }"
-    [ "$hn" != "unknown" ] && log "Added client (DHCP hostname): MAC=$mac IP=$ip Hostname=$hn IF=$ifc Via=$via" || \
-      log "Added client (no hostname): MAC=$mac IP=$ip Hostname=unknown IF=$ifc Via=$via"
-  }
-
-  for ifc in $(iw dev 2>/dev/null | awk '/Interface/{print $2}'); do
-    for sta in $(iw dev "$ifc" station dump | awk '/Station/{print $2}' | tr 'A-Z' 'a-z'); do
-      echo "$sta" >> "$SEEN"
-      entry="$(lookup_dhcp "$sta")"
-      ip="unknown"; hn="unknown"
-      [ -n "$entry" ] && { ip="$(echo "$entry" | cut -d, -f1)"; hn="$(echo "$entry" | cut -d, -f2)"; }
-      add_client "$sta" "$ip" "$hn" "$ifc" "wifi"
-    done
-  done
-
-  if [ -f /tmp/dhcp.leases ]; then
-    while read -r exp mac ip hostname cid; do
-      cm="$(normalize_mac "$mac")"
-      grep -q "$cm" "$SEEN" && continue
-      echo "$cm" >> "$SEEN"
-      [ "$hostname" = "*" ] || [ -z "$hostname" ] && hostname="unknown"
-      ifc="$(find_interface "$cm")"
-      add_client "$cm" "$ip" "$hostname" "$ifc" "ethernet"
-    done < /tmp/dhcp.leases
-  fi
-
-  while read -r ip dev ll mac rest; do
-    cm="$(normalize_mac "$mac")"
-    echo "$ip" | grep -q '^fe80::' && continue
-    grep -q "$cm" "$SEEN" && continue
-    echo "$cm" >> "$SEEN"
-    entry="$(lookup_dhcp "$cm")"
-    hn="unknown"
-    [ -n "$entry" ] && hn="$(echo "$entry" | cut -d, -f2)"
-    ifc="$(find_interface "$cm")"
-    add_client "$cm" "$ip" "$hn" "$ifc" "ethernet"
-  done <<EOF
-$(ip neigh show)
-EOF
-
-  rm -f "$SEEN"
-
-  SETTINGS=$(cat <<EOF
-{ "model":"$MODEL",
-  "wan_ip":"$DEVICE_IP",
-  "dns":[ $DNS_LIST ],
-  "firewall":$FIREWALL,
-  "ntp":$NTP,
-  "firewall_profile":"$ACTIVE_PROFILE",
-  "fw_log_prefix":"$LOG_PREF",
-  "security_log_samples":$SEC_JSON }
-EOF
-)
-
-  cat <<EOF > "$PAYLOAD_FILE"
+  cat <<JSON
 {
-  "hostname":"$HOSTNAME",
-  "mac":"$MAC",
-  "ssh_fingerprint":"$FPR",
-  "ssh_enabled":$SSH_ENABLED,
-  "settings":$SETTINGS,
-  "clients":[ $CLIENTS ]
+  "mac": "$MAC",
+  "hostname": "$HOSTNAME",
+  "device_type": "$DEVICE_TYPE",
+  "model": "$(echo "$model" | json_escape)",
+  "wan_ip": "$(echo "$wan_ip" | json_escape)",
+  "dns_servers": $dns_json,
+  "ntp_synced": $ntp_synced,
+  "firewall_state": "$(echo "$fw_state" | json_escape)",
+  "firewall_profile_active": "$(echo "$fw_profile_active" | json_escape)",
+  "security_log_samples": $sec_json
 }
-EOF
-}
-
-register_device() {
-  SSH_ENABLED=false
-  pgrep dropbear >/dev/null && [ -s /etc/dropbear/dropbear_rsa_host_key ] && SSH_ENABLED=true
-  JSON="{\"hostname\":\"$HOSTNAME\",\"mac\":\"$MAC\",\"ssh_fingerprint\":\"$FPR\",\"ssh_enabled\":$SSH_ENABLED}"
-  log "Registering device (hostname: $HOSTNAME)"
-  curl --cacert "$CA_CERT" -s -X POST "$CONTROLLER_URL/register" \
-       -H "Content-Type: application/json" -d "$JSON" >/dev/null 2>&1
-}
-
-fetch_token() {
-  log "Requesting token for MAC: $MAC"
-  RESPONSE="$(curl --path-as-is --cacert "$CA_CERT" -s -w '\n%{http_code}' "$CONTROLLER_URL/token/$MAC")"
-  BODY="$(printf '%s\n' "$RESPONSE" | head -n1)"
-  CODE="$(printf '%s\n' "$RESPONSE" | tail -n1)"
-  log "Token HTTP code: $CODE"
-  log "Token body: $BODY"
-  if [ "$CODE" = "200" ]; then
-    TOKEN="$(echo "$BODY" | grep -oE '"token"\s*:\s*"[^"]+"' | sed -E 's/.*"token"\s*:\s*"([^"]+)".*/\1/')"
-    log "Parsed token: '$TOKEN'"
-    if [ -n "$TOKEN" ]; then
-      echo "$TOKEN" > "$TOKEN_FILE"; chmod 600 "$TOKEN_FILE"
-      log "Token saved"
-    else
-      log "Empty token – will retry"; rm -f "$TOKEN_FILE"
-    fi
-  else
-    log "Token fetch failed, waiting..."; rm -f "$TOKEN_FILE"
-  fi
+JSON
 }
 
 send_status() {
-  [ ! -f "$TOKEN_FILE" ] && return 1
-  TOKEN="$(cat "$TOKEN_FILE")"
-  log "Sending status update..."
-  build_payload
-  HTTP_CODE=$(curl --cacert "$CA_CERT" -s -o /dev/null -w '%{http_code}' \
-               -H "X-API-Token: $TOKEN" \
-               -H "Content-Type: application/json" \
-               -X POST "$CONTROLLER_URL/status" \
-               -d @"$PAYLOAD_FILE")
-  log "Status update response: HTTP $HTTP_CODE"
-  if [ "$HTTP_CODE" = "403" ]; then
-    log "Token invalid – clearing and refetching"
-    rm -f "$TOKEN_FILE"
-  elif [ "$HTTP_CODE" != "200" ]; then
-    log ">>> Payload causing failure:"
-    log "$(cat "$PAYLOAD_FILE")"
+  payload="$(build_status_payload)"
+  # Write human-readable copy for debugging
+  echo "$payload" | jq . 2>/dev/null >> /tmp/wiretide-status-last.json
+  code=$(curl $CURL_OPTS_COMMON -o /dev/null -w '%{http_code}' \
+        -H "X-API-Token: $TOKEN" -H 'Content-Type: application/json' \
+        -X POST "$CONTROLLER_URL/status" \
+        --data "$payload")
+  log "Sending status update... HTTP $code"
+  [ "$code" = "200" ] || return 1
+  return 0
+}
+
+# =============================
+# Config pull & apply
+# =============================
+apply_firewall_profile() {
+  prof="$1"
+  [ -n "$prof" ] || return 0
+  echo "$prof" > "$FW_PROFILE_FILE"
+  log "Applied firewall profile: $prof (saved to $FW_PROFILE_FILE)"
+}
+
+ensure_security_logging_rule() {
+  enabled="$1"; level="$2"; prefix="$3"
+  # Persist prefix
+  [ -n "$prefix" ] && { echo "$prefix" > "$FW_PREFIX_FILE"; SEC_PREFIX="$prefix"; }
+
+  if [ "$enabled" = "true" ]; then
+    # Create/update a firewall rule that logs input traffic; conservative defaults
+    uci -q show firewall.wtsec_log >/dev/null 2>&1 || uci set firewall.wtsec_log="rule"
+    uci set firewall.wtsec_log.name="Wiretide Security Log"
+    uci set firewall.wtsec_log.src="lan"
+    uci set firewall.wtsec_log.target="LOG"
+    uci set firewall.wtsec_log.proto="all"
+    uci set firewall.wtsec_log.family="any"
+    uci set firewall.wtsec_log.enabled="1"
+    uci set firewall.wtsec_log.limit="10/second"
+    uci set firewall.wtsec_log.log_prefix="$SEC_PREFIX"
+    # Map level roughly; OpenWrt fw4 uses kernel log levels (0..7)
+    case "$level" in
+      debug)  uci set firewall.wtsec_log.log_level="7";;
+      info)   uci set firewall.wtsec_log.log_level="6";;
+      notice) uci set firewall.wtsec_log.log_level="5";;
+      warn)   uci set firewall.wtsec_log.log_level="4";;
+      err)    uci set firewall.wtsec_log.log_level="3";;
+      *)      uci set firewall.wtsec_log.log_level="6";;
+    esac
+    uci commit firewall
+    /etc/init.d/firewall reload >/dev/null 2>&1 || /etc/init.d/firewall restart >/dev/null 2>&1
+    logger "$SEC_PREFIX TEST: security logging active (level=$level)"
+    log "Security logging enabled (prefix=$SEC_PREFIX, level=$level)"
+  else
+    # Disable rule if present
+    if uci -q show firewall.wtsec_log >/dev/null 2>&1; then
+      uci set firewall.wtsec_log.enabled="0"
+      uci commit firewall
+      /etc/init.d/firewall reload >/dev/null 2>&1 || true
+    fi
+    log "Security logging disabled"
   fi
 }
 
-handle_package() {
-  [ ! -f "$TOKEN_FILE" ] && return
-  TOKEN="$(cat "$TOKEN_FILE")"
-  RESPONSE="$(curl --cacert "$CA_CERT" -s -H "X-API-Token: $TOKEN" -H "X-MAC: $MAC" "$CONTROLLER_URL/config")"
-  PKG_JSON="$(echo "$RESPONSE" | jq -c '.package')"
-  EXPECTED="$(echo "$RESPONSE" | jq -r '.sha256')"
+handle_config() {
+  # Pull config from controller and apply
+  json=$(curl $CURL_OPTS_COMMON -H "X-API-Token: $TOKEN" -H "X-MAC: $MAC" \
+               -X GET "$CONTROLLER_URL/config" 2>/dev/null)
+  [ -n "$json" ] || { log "No config (empty)"; return 0; }
 
-  # niets te doen?
-  if [ "$PKG_JSON" = "{}" ] || [ -z "$EXPECTED" ]; then
-    return
-  fi
+  pkg=$(echo "$json" | jq -c '.package // {}' 2>/dev/null)
+  [ -n "$pkg" ] || { log "No package in config"; return 0; }
 
-  # integriteitscheck (moet gelijk zijn aan controller)
-  ACTUAL="$(sha256_json "$PKG_JSON")"
-  if [ "$EXPECTED" != "$ACTUAL" ]; then
-    log "Package SHA256 mismatch (expected $EXPECTED, got $ACTUAL)"
-    return
-  fi
-
-  # idem‑potent: als we dit pakket al hebben toegepast, niets doen
-  LAST_SHA_FILE="/etc/wiretide/last_config_sha"
-  mkdir -p /etc/wiretide
-  if [ -f "$LAST_SHA_FILE" ] && [ "$(cat "$LAST_SHA_FILE" 2>/dev/null)" = "$EXPECTED" ]; then
-    return
-  fi
-
-  log "Executing config package..."
-
-  # --- Firewall profiel toepassen (fw4 config-bestand kopiëren) ---
-  FIREWALL_PROFILE="$(echo "$PKG_JSON" | jq -r '.firewall_profile // empty')"
-  if [ -n "$FIREWALL_PROFILE" ]; then
-    FILE="/etc/wiretide/profiles/firewall-$FIREWALL_PROFILE.conf"
-    if [ -f "$FILE" ]; then
-      cp "$FILE" /etc/config/firewall
-      uci commit firewall 2>/dev/null || true
-      /etc/init.d/firewall restart
-      echo "$FIREWALL_PROFILE" > /etc/wiretide/fw_active_profile
-      log "Applied profile: $FIREWALL_PROFILE"
-    else
-      log "Missing profile: $FIREWALL_PROFILE"
-    fi
-  fi
-
-  # --- Security logging (FW4 only) ---
-  SEC_LOG="$(echo "$PKG_JSON" | jq -c '.security_logging // {}')"
-  if echo "$SEC_LOG" | jq -e 'to_entries | length > 0' >/dev/null 2>&1; then
-    EN="$(echo "$SEC_LOG" | jq -r '.enabled // false')"
-    LVL="$(echo "$SEC_LOG" | jq -r '.level // "info"')"
-    PFX="$(echo "$SEC_LOG" | jq -r '.prefix // "WTSEC"')"
-
-    echo "$PFX" > /etc/wiretide/fw_log_prefix
-    echo "$EN"  > /etc/wiretide/fw_log_enabled
-    echo "$LVL" > /etc/wiretide/fw_log_level
-
-    # purge bestaande WTSEC-logregels (veilig, idempotent)
-    _fw4_purge_log_rules() {
-      want_prefix="$1"
-      # loop indices achteruit om delete-ops veilig te doen
-      for i in $(uci show firewall 2>/dev/null | grep -o 'firewall\.@rule\[[0-9]\+\]' | sed 's/.*\[//;s/\]//' | sort -nr); do
-        extra="$(uci -q get firewall.@rule[$i].extra)"
-        name="$(uci -q get firewall.@rule[$i].name)"
-        case "$extra $name" in
-          *"log prefix"*"$want_prefix"*|*"Wiretide Security Log"*)
-            uci delete firewall.@rule[$i]
-            ;;
-        esac
-      done
-    }
-
-    _fw4_purge_log_rules "$PFX"
-
-    if [ "$EN" = "true" ]; then
-      # veilige default: alleen loggen (geen drop) op hoge testpoort vanaf LAN
-      uci add firewall rule >/dev/null
-      uci set firewall.@rule[-1].name='Wiretide Security Log'
-      uci set firewall.@rule[-1].src='lan'
-      uci set firewall.@rule[-1].proto='tcp'
-      uci set firewall.@rule[-1].dest_port='65000'
-      uci set firewall.@rule[-1].target='accept'
-      uci set firewall.@rule[-1].extra="log prefix \"$PFX\" level $LVL"
-      log "FW4 security logging enabled (prefix=$PFX level=$LVL)"
-    else
-      log "FW4 security logging disabled"
-    fi
-
-    uci commit firewall 2>/dev/null || true
-    /etc/init.d/firewall restart
-
-    # synthetische testlog zodat de controller meteen samples ziet
-    logger "${PFX} TEST: security logging path OK (prefix ${PFX}, level ${LVL})"
-  fi
-
-  # --- Apps installeren (ongewijzigd) ---
-  opkg update
-  echo "$PKG_JSON" | jq -r '.apps[]?' | while IFS= read -r app; do
-    if [ -n "$(opkg list-installed "$app" 2>/dev/null)" ]; then
-      log "$app already installed"
-    else
-      log "Installing app: $app"
-      if opkg install "$app"; then
-        VERSION="$(opkg list-installed "$app" | awk '{print $3}')"
-        log "Installed: $app (version $VERSION)"
+  # Optional apps: only opkg update when needed
+  apps_count=$(echo "$pkg" | jq -r '(.apps // []) | length' 2>/dev/null)
+  if [ "$apps_count" -gt 0 ]; then
+    log "Apps requested: $apps_count → opkg update"
+    timeout 25 opkg update >/dev/null 2>&1 || log "opkg update timed out/failed"
+    echo "$pkg" | jq -r '.apps[]?' | while IFS= read -r app; do
+      [ -n "$app" ] || continue
+      if opkg list-installed "$app" >/dev/null 2>&1; then
+        log "$app already installed"
       else
-        log "Failed to install: $app"
+        log "Installing $app"
+        timeout 60 opkg install "$app" >/dev/null 2>&1 || log "Install failed/timeout: $app"
       fi
-    fi
-  done
-
-  # markeer toegepast pakket voor idempotentie
-  echo "$EXPECTED" > "$LAST_SHA_FILE"
-}
-
-  # --- DHCP config toepassen (ongewijzigd) ---
-  DHCP_CONFIG="$(echo "$PKG_JSON" | jq -c '.dhcp // {}')"
-  if echo "$DHCP_CONFIG" | jq -e 'to_entries | length > 0' >/dev/null 2>&1; then
-    echo "$DHCP_CONFIG" | jq -r 'to_entries[] | "uci set dhcp.@dnsmasq[0].\(.key)=\"\(.value)\""' | sh
-    uci commit dhcp && /etc/init.d/dnsmasq restart && log "DHCP config updated"
-  fi
-
-  # markeer pakket als toegepast
-  echo "$EXPECTED" > "$LAST_SHA_FILE"
-
-  # versneld terugmelden (niet wachten op INTERVAL)
-  send_status || true
-}
-
-
-  # --- Apps installeren ---
-  opkg update
-  echo "$PKG_JSON" | jq -r '.apps[]?' | while IFS= read -r app; do
-    if [ -n "$(opkg list-installed "$app" 2>/dev/null)" ]; then
-      log "$app already installed"
-    else
-      log "Installing app: $app"
-      if opkg install "$app"; then
-        VERSION="$(opkg list-installed "$app" | awk '{print $3}')"
-        log "Installed: $app (version $VERSION)"
-      else
-        log "Failed to install: $app"
-      fi
-    fi
-  done
-
-  # --- DHCP config toepassen ---
-  DHCP_CONFIG="$(echo "$PKG_JSON" | jq -c '.dhcp // {}')"
-  if echo "$DHCP_CONFIG" | jq -e 'to_entries | length > 0' >/dev/null 2>&1; then
-    echo "$DHCP_CONFIG" | jq -r 'to_entries[] | "uci set dhcp.@dnsmasq[0].\(.key)=\"\(.value)\""' | sh
-    uci commit dhcp && /etc/init.d/dnsmasq restart && log "DHCP config updated"
-  fi
-}
-
-
-log "Starting Wiretide agent (Controller: $CONTROLLER_URL, MAC: $MAC)"
-register_device
-
-while [ ! -f "$TOKEN_FILE" ]; do
-  fetch_token
-  [ -f "$TOKEN_FILE" ] || sleep "$POLL_DELAY"
-done
-
-while true; do
-  send_status
-  handle_package
-  if [ ! -f "$TOKEN_FILE" ]; then
-    while [ ! -f "$TOKEN_FILE" ]; do
-      fetch_token
-      [ -f "$TOKEN_FILE" ] || sleep "$POLL_DELAY"
     done
   fi
+
+  # Firewall profile
+  prof=$(echo "$pkg" | jq -r '.firewall_profile // empty' 2>/dev/null)
+  [ -n "$prof" ] && apply_firewall_profile "$prof"
+
+  # Security logging
+  sec_enabled=$(echo "$pkg" | jq -r '.security_logging.enabled // false' 2>/dev/null)
+  sec_level=$(echo   "$pkg" | jq -r '.security_logging.level   // "info"' 2>/dev/null)
+  sec_prefix=$(echo  "$pkg" | jq -r '.security_logging.prefix  // "'"$SEC_PREFIX_DEFAULT"'"' 2>/dev/null)
+  [ "$sec_enabled" = "true" ] || [ "$sec_enabled" = "false" ] || sec_enabled=false
+  ensure_security_logging_rule "$sec_enabled" "$sec_level" "$sec_prefix"
+}
+
+# =============================
+# Main loop
+# =============================
+while true; do
+  send_status || log "Status post failed"
+  handle_config || log "Config apply failed"
   sleep "$INTERVAL"
 done
-
