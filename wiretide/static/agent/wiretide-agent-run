@@ -1,9 +1,9 @@
 #!/bin/sh
 # Wiretide Agent – resilient loop + firewall logging + timeouts
-# Version: 2025.08.11-fwsec9
+# Version: 2025.08.11-fwsec10
 # Target: OpenWrt BusyBox / ash
 
-VERSION="Wiretide Agent v2025.08.11+fwsec9"
+VERSION="Wiretide Agent v2025.08.11+fwsec10"
 LOG_FILE="/tmp/wiretide-debug.log"
 INTERVAL="${INTERVAL:-60}"
 CA_CERT="${CA_CERT:-/etc/wiretide-ca.crt}"
@@ -211,6 +211,35 @@ handle_config() {
   sec_prefix=$(echo "$pkg" | jq -r '.security_logging.prefix // "'"$SEC_PREFIX_DEFAULT"'"')
   ensure_security_logging_rule "$sec_enabled" "$sec_prefix"
 }
+
+apply_apps() {
+  [ ! -f "$TOKEN_FILE" ] && return
+  TOKEN="$(cat "$TOKEN_FILE")"
+  json=$(curl $CURL_OPTS_COMMON -H "X-API-Token: $TOKEN" -H "X-MAC: $MAC" -X GET "$CONTROLLER_URL/config")
+  [ -z "$json" ] && { log "No config for apps"; return; }
+
+  apps=$(echo "$json" | jq -r '.package.apps[]?' 2>/dev/null)
+  [ -z "$apps" ] && return
+
+  for app in $apps; do
+    case "$app" in
+      adblock|banip)
+        if opkg list-installed "$app" >/dev/null 2>&1; then
+          log "$app already installed"
+        else
+          log "Installing $app..."
+          opkg update >/dev/null 2>&1
+          out=$(opkg install "$app" 2>&1)
+          log "$app install result:\n$out"
+        fi
+        ;;
+      *)
+        log "Ignoring unsupported app: $app"
+        ;;
+    esac
+  done
+}
+
 
 # ========== Main ==========
 lockfile="/var/run/wiretide-agent.lock"

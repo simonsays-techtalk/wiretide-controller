@@ -28,6 +28,19 @@
     <p><strong>IP:</strong> {{ device.ip }}</p>
     <p><strong>SSH:</strong> {{ "Enabled" if device.ssh_enabled else "Disabled" }}</p>
   </div>
+  <form method="POST" action="/devices/{{ device.mac }}/agent-update" class="mt-4 bg-white dark:bg-gray-800 p-4 rounded shadow">
+    <label class="inline-flex items-center">
+      <input type="checkbox" name="enabled" value="true"
+             {% if device.agent_update_allowed %}checked{% endif %}
+             class="form-checkbox h-4 w-4 text-blue-600">
+      <span class="ml-2 text-sm text-gray-800 dark:text-gray-200">Allow automatic agent updates</span>
+    </label>
+    <div class="mt-2">
+      <button type="submit"
+              class="px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700">Save settings</button>
+    </div>
+  </form>
+
 
   {% if settings %}
   <div class="bg-white dark:bg-gray-800 p-4 mt-6 rounded shadow">
@@ -114,9 +127,18 @@
   </div>
 </div>
 
+<!-- Apps Tab -->
+<div id="tab-apps" class="tab-content hidden">
+  <div class="bg-white dark:bg-gray-800 p-4 rounded shadow space-y-2">
+    <label><input type="checkbox" id="install-adblock" class="mr-2">Install Adblock</label><br>
+    <label><input type="checkbox" id="install-banip" class="mr-2">Install banIP</label><br>
+    <button onclick="queueAppTasks()" class="mt-2 px-4 py-2 bg-blue-600 text-white rounded">Send to Device</button>
+  </div>
+</div>
+
+
 <!-- Other tabs (placeholders to keep layout consistent) -->
 <div id="tab-dhcp" class="tab-content hidden"><div class="p-4 bg-white dark:bg-gray-800 rounded shadow">Coming soon</div></div>
-<div id="tab-apps" class="tab-content hidden"><div class="p-4 bg-white dark:bg-gray-800 rounded shadow">Coming soon</div></div>
 <div id="tab-logs" class="tab-content hidden"><div class="p-4 bg-white dark:bg-gray-800 rounded shadow">Coming soon</div></div>
 <div id="tab-advanced" class="tab-content hidden"><div class="p-4 bg-white dark:bg-gray-800 rounded shadow">Coming soon</div></div>
 
@@ -176,5 +198,41 @@
       alert('Network error while queuing config');
     }
   });
+  
+  async function queueAppTasks() {
+  const mac = "{{ device.mac }}";
+  const adblock = document.getElementById("install-adblock").checked;
+  const banIP = document.getElementById("install-banip").checked;
+  const apps = [];
+  if (adblock) apps.push("adblock");
+  if (banIP) apps.push("banip");
+  if (apps.length === 0) return;
+
+  const pkg = { apps };
+  const pkgStr = stableStringify(pkg);
+  const sha = await sha256(pkgStr);
+
+  const formData = new FormData();
+  formData.append("mac", mac);
+  formData.append("package_json", pkgStr);
+  formData.append("sha256", sha);
+
+  try {
+    const res = await fetch("/api/queue-config", { method: "POST", body: formData });
+    if (res.ok) {
+      alert("App install package sent to device.");
+    } else {
+      const body = await res.json();
+      let msg = "Unknown error";
+      if (typeof body.detail === "string") msg = body.detail;
+      else if (Array.isArray(body.detail)) msg = body.detail.map(e => e.msg || JSON.stringify(e)).join(", ");
+      else if (typeof body.detail === "object") msg = JSON.stringify(body.detail);
+      alert("Failed: " + msg);
+    }
+  } catch (err) {
+    alert("Network error: " + err);
+  }
+}
+
 </script>
 {% endblock %}

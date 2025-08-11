@@ -264,7 +264,7 @@ async def device_page(device_type: str, mac: str, request: Request, _: str = Dep
     async with aiosqlite.connect(DB_PATH) as db:
         # Basis device-info
         cursor = await db.execute(
-            "SELECT hostname, ip, ssh_enabled, device_type FROM devices WHERE mac = ?", (mac_norm,)
+            "SELECT hostname, ip, ssh_enabled, device_type, agent_update_allowed FROM devices WHERE mac = ?", (mac_norm,)
         )
         row = await cursor.fetchone()
         if not row:
@@ -276,6 +276,7 @@ async def device_page(device_type: str, mac: str, request: Request, _: str = Dep
             "ssh_enabled": bool(row[2]),
             "device_type": row[3],
             "mac": mac_norm,
+            "agent_update_allowed": bool(row[4]),
         }
 
         # Live status + extra firewallvelden
