@@ -1,29 +1,23 @@
 #!/bin/sh
 # Wiretide Agent – resilient loop + firewall logging + timeouts
-# Version: 2025.08.10-fwsec6
+# Version: 2025.08.11-fwsec9
 # Target: OpenWrt BusyBox / ash
 
-# =============================
-# Config & defaults
-# =============================
-VERSION="Wiretide Agent v2025.08.10+fwsec4"
+VERSION="Wiretide Agent v2025.08.11+fwsec9"
 LOG_FILE="/tmp/wiretide-debug.log"
 INTERVAL="${INTERVAL:-60}"
 CA_CERT="${CA_CERT:-/etc/wiretide-ca.crt}"
 CTRL_FILE="/etc/wiretide-controller"
 TOKEN_FILE="/etc/wiretide-token"
-CONF_FILE="/etc/wiretide/agent.conf"  # optional key=value overrides
+CONF_FILE="/etc/wiretide/agent.conf"
 FW_PROFILE_FILE="/etc/wiretide/firewall_profile_active"
 FW_PREFIX_FILE="/etc/wiretide/fw_log_prefix"
+PAYLOAD_FILE="/tmp/wiretide-last-payload.json"
 SEC_PREFIX_DEFAULT="WTSEC"
 
-# curl safety options (short, strict, with timeouts)
 CURL_OPTS_COMMON="-s --connect-timeout 5 --max-time 15"
 [ -s "$CA_CERT" ] && CURL_OPTS_COMMON="$CURL_OPTS_COMMON --cacert $CA_CERT"
 
-# =============================
-# Helpers
-# =============================
 log() {
   ts="[$(date '+%Y-%m-%d %H:%M:%S')]"
   echo "$ts $*" >> "$LOG_FILE"
@@ -31,16 +25,12 @@ log() {
 
 normalize_mac() { echo "$1" | tr 'A-F' 'a-f'; }
 
-val_or_default() { [ -n "$1" ] && echo "$1" || echo "$2"; }
-
 read_conf_if_exists() {
   [ -s "$CONF_FILE" ] || return 0
-  # shellcheck disable=SC1090
   . "$CONF_FILE" 2>/dev/null || true
 }
 
 get_mac() {
-  # 1) From config var MAC, 2) UCI lan, 3) br-lan, 4) eth0
   if [ -n "$MAC" ]; then echo "$(normalize_mac "$MAC")"; return; fi
   mac="$(uci -q get network.lan.macaddr 2>/dev/null)"; [ -n "$mac" ] && { echo "$(normalize_mac "$mac")"; return; }
   [ -r /sys/class/net/br-lan/address ] && { cat /sys/class/net/br-lan/address; return; }
@@ -51,16 +41,11 @@ get_hostname() {
   uci -q get system.@system[0].hostname 2>/dev/null || uname -n
 }
 
-get_lan_ip() {
-  ip -4 addr show br-lan 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -n1
-}
-
 get_wan_ip() {
-  # Try the outbound interface, then a direct query on wan
   dev="$(ip route get 1.1.1.1 2>/dev/null | awk '/dev/{for(i=1;i<=NF;i++){if($i=="dev"){print $(i+1); exit}}}')"
-  [ -n "$dev" ] && ip -4 addr show "$dev" 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -n1 && return
+  [ -n "$dev" ] && ip -4 addr show "$dev" 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 && return
   wanif="$(uci -q get network.wan.ifname 2>/dev/null)"
-  [ -n "$wanif" ] && ip -4 addr show "$wanif" 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -n1
+  [ -n "$wanif" ] && ip -4 addr show "$wanif" 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1
 }
 
 get_dns_list() {
@@ -72,7 +57,6 @@ get_dns_list() {
 }
 
 is_ntp_synced() {
-  # Best-effort; avoid blocking calls. Consider synced if time is > 2020.
   year=$(date +%Y 2>/dev/null)
   if [ "$year" -ge 2020 ]; then echo true; else echo false; fi
 }
@@ -82,71 +66,15 @@ json_escape() { sed 's/\\/\\\\/g; s/"/\\"/g'; }
 security_log_samples_json() {
   prefix="$(cat "$FW_PREFIX_FILE" 2>/dev/null)"; [ -n "$prefix" ] || prefix="$SEC_PREFIX_DEFAULT"
   if command -v jq >/dev/null 2>&1; then
-    # Use jq to safely convert lines to JSON array, last 20 entries
-    logread -l 400 2>/dev/null | grep "$prefix" | tail -n 20 | jq -R -s 'split("
-") | map(select(length>0))'
+    logread -l 400 2>/dev/null | grep "$prefix" | tail -n 20 | jq -R -s 'split("\n") | map(select(length>0))'
   else
-    # Fallback without sed tricks
-    tmp="/tmp/wtsec-lines.$$"
-    logread -l 400 2>/dev/null | grep "$prefix" | tail -n 20 > "$tmp" 2>/dev/null || true
-    printf '['
-    i=0
-    while IFS= read -r line; do
-      # escape backslash and quotes
-      esc="$(printf '%s' "$line" | awk 'BEGIN{ORS=""} {gsub(/\/,"\\"); gsub(/"/,"\\""); print}')"
-      [ $i -gt 0 ] && printf ','
-      printf '"%s"' "$esc"
-      i=$((i+1))
-    done < "$tmp"
-    printf ']'
-    rm -f "$tmp"
+    printf '[]'
   fi
 }
 
-stable_json_sha256() {
-  # requires jq and sha256sum
-  printf '%s' "$1" | jq -S -c . 2>/dev/null | tr -d '\n' | sha256sum | awk '{print $1}'
-}
-
-# =============================
-# Single instance guard
-# =============================
-lockfile="/var/run/wiretide-agent.lock"
-if command -v flock >/dev/null 2>&1; then
-  exec 9>"$lockfile"
-  if ! flock -n 9; then
-    log "Another instance is running; exiting"
-    exit 0
-  fi
-else
-  if [ -e "$lockfile" ]; then
-    oldpid=$(cat "$lockfile" 2>/dev/null)
-    [ -n "$oldpid" ] && kill -0 "$oldpid" 2>/dev/null && { log "Instance $oldpid active; exiting"; exit 0; }
-  fi
-  echo $$ > "$lockfile"
-fi
-
-# =============================
-# Bootstrap
-# =============================
-read_conf_if_exists
-CONTROLLER_URL="$(cat "$CTRL_FILE" 2>/dev/null)"
-[ -n "$CONTROLLER_URL" ] || CONTROLLER_URL="https://127.0.0.1"
-TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)"
-MAC="$(get_mac)"; MAC="$(normalize_mac "$MAC")"
-HOSTNAME="$(get_hostname)"
-DEVICE_TYPE="${DEVICE_TYPE:-router}"
-SEC_PREFIX="$(cat "$FW_PREFIX_FILE" 2>/dev/null)"; [ -n "$SEC_PREFIX" ] || SEC_PREFIX="$SEC_PREFIX_DEFAULT"
-
-log "Starting $VERSION (PID $$)"
-log "Controller=$CONTROLLER_URL, MAC=$MAC, Hostname=$HOSTNAME, Interval=${INTERVAL}s"
-
-# =============================
-# Status payload
-# =============================
-build_status_payload() {
+build_payload() {
   ssh_enabled=false
-  pgrep dropbear >/dev/null 2>&1 && [ -s /etc/dropbear/dropbear_rsa_host_key ] && ssh_enabled=true
+  pgrep dropbear >/dev/null && [ -s /etc/dropbear/dropbear_rsa_host_key ] && ssh_enabled=true
 
   dns_csv="$(get_dns_list)"
   dns_json="[]"
@@ -154,15 +82,12 @@ build_status_payload() {
 
   sec_json="$(security_log_samples_json)"; [ -n "$sec_json" ] || sec_json="[]"
 
-  wan_ip="$(get_wan_ip)"; lan_ip="$(get_lan_ip)"
   model="$(cat /tmp/sysinfo/model 2>/dev/null)"; [ -n "$model" ] || model="unknown"
   ntp_ok="$(is_ntp_synced)"
-  fw_profile_active="$(cat "$FW_PROFILE_FILE" 2>/dev/null | tr -d '
-')"
+  fw_profile_active="$(cat "$FW_PROFILE_FILE" 2>/dev/null | tr -d '\r\n')"
   [ -n "$fw_profile_active" ] || fw_profile_active="unknown"
 
-  # Server expects a 'settings' object; keys: model, wan_ip, dns, ntp, firewall, firewall_profile, security_log_samples
-  cat <<JSON
+  cat <<JSON > "$PAYLOAD_FILE"
 {
   "mac": "$MAC",
   "hostname": "$HOSTNAME",
@@ -170,7 +95,7 @@ build_status_payload() {
   "ssh_enabled": $ssh_enabled,
   "settings": {
     "model": "$(echo "$model" | json_escape)",
-    "wan_ip": "$(echo "$wan_ip" | json_escape)",
+    "wan_ip": "$(echo "$(get_wan_ip)" | json_escape)",
     "dns": $dns_json,
     "ntp": $ntp_ok,
     "firewall": true,
@@ -181,37 +106,71 @@ build_status_payload() {
 JSON
 }
 
+fetch_token() {
+  log "Fetching token from controller..."
+  newtok="$(curl $CURL_OPTS_COMMON "$CONTROLLER_URL/token/$MAC" | grep -oE '"token"\s*:\s*"[^"]+"' | sed -E 's/.*"token"\s*:\s*"([^"]+)".*/\1/')"
+  if [ -n "$newtok" ]; then
+    echo "$newtok" > "$TOKEN_FILE"; chmod 600 "$TOKEN_FILE"
+    TOKEN="$newtok"
+    log "New token saved"
+  else
+    log "Token fetch failed"
+  fi
+}
+
 send_status() {
-  payload="$(build_status_payload)"
-  # Write human-readable copy for debugging
-  echo "$payload" | jq . 2>/dev/null >> /tmp/wiretide-status-last.json
-  code=$(curl $CURL_OPTS_COMMON -o /dev/null -w '%{http_code}' \
-        -H "X-API-Token: $TOKEN" -H 'Content-Type: application/json' \
-        -X POST "$CONTROLLER_URL/status" \
-        --data "$payload")
-  log "Sending status update... HTTP $code"
-  [ "$code" = "200" ] || return 1
+  [ ! -f "$TOKEN_FILE" ] && return 1
+  TOKEN="$(cat "$TOKEN_FILE")"
+  log "Sending status update..."
+  build_payload
+  [ -s "$PAYLOAD_FILE" ] || { log "❌ Payload file does not exist"; return 1; }
+
+  BYTES=$(ls -l "$PAYLOAD_FILE" 2>/dev/null | awk '{print $5}')
+  if [ -z "$BYTES" ] || [ "$BYTES" -lt 50 ]; then
+    log "⚠️ Payload file too small or unreadable, skipping"
+    cat "$PAYLOAD_FILE"
+    return 1
+  fi
+
+  HTTP_CODE=$(curl $CURL_OPTS_COMMON -o /dev/null -w '%{http_code}' \
+    -H "X-API-Token: $TOKEN" \
+    -H "Content-Type: application/json" \
+    -X POST "$CONTROLLER_URL/status" --data @"$PAYLOAD_FILE")
+  log "Status update response: HTTP $HTTP_CODE"
+
+  if [ "$HTTP_CODE" = "403" ]; then
+    log "Token rejected, attempting refresh"
+    fetch_token
+    TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)"
+    [ -n "$TOKEN" ] || { log "Refresh failed"; return 1; }
+
+    HTTP_CODE=$(curl $CURL_OPTS_COMMON -o /dev/null -w '%{http_code}' \
+      -H "X-API-Token: $TOKEN" \
+      -H "Content-Type: application/json" \
+      -X POST "$CONTROLLER_URL/status" --data @"$PAYLOAD_FILE")
+    log "Retry status post: HTTP $HTTP_CODE"
+    [ "$HTTP_CODE" = "200" ] || return 1
+  elif [ "$HTTP_CODE" != "200" ]; then
+    log "❌ Status post failed: HTTP $HTTP_CODE"
+    log "$(cat "$PAYLOAD_FILE")"
+    return 1
+  fi
   return 0
 }
 
-# =============================
-# Config pull & apply
-# =============================
 apply_firewall_profile() {
   prof="$1"
   [ -n "$prof" ] || return 0
   echo "$prof" > "$FW_PROFILE_FILE"
   sync
-  log "Applied firewall profile: $prof (saved to $FW_PROFILE_FILE)"
+  log "Applied firewall profile: $prof"
 }
 
 ensure_security_logging_rule() {
-  enabled="$1"; level="$2"; prefix="$3"
-  [ -n "$prefix" ] && { echo "$prefix" > "$FW_PREFIX_FILE"; SEC_PREFIX="$prefix"; }
+  enabled="$1"; prefix="$2"
+  [ -n "$prefix" ] && echo "$prefix" > "$FW_PREFIX_FILE"
 
-  # Cleanup legacy options and stale rules
   uci -q delete firewall.wtsec_log.extra >/dev/null 2>&1 || true
-  # also remove any anonymous rule using old fw3 extra option
   for opt in $(uci show firewall | awk -F'=' '/\.extra=/{print $1}'); do uci -q delete "$opt"; done
 
   if [ "$enabled" = "true" ]; then
@@ -222,67 +181,63 @@ ensure_security_logging_rule() {
     uci set firewall.wtsec_log.proto='all'
     uci set firewall.wtsec_log.enabled='1'
     uci set firewall.wtsec_log.limit='10/second'
-
-    # fw4: use 'log' with a string to set prefix; no log_prefix/log_level
-    uci set firewall.wtsec_log.log="${SEC_PREFIX} "
+    uci set firewall.wtsec_log.log="${prefix:-$SEC_PREFIX_DEFAULT} "
     uci set firewall.wtsec_log.target='ACCEPT'
-
     uci commit firewall
-    /etc/init.d/firewall reload >/dev/null 2>&1 || /etc/init.d/firewall restart >/dev/null 2>&1
-    logger "${SEC_PREFIX} TEST: security logging active"
-    log "Security logging enabled (fw4 compliant, prefix=$SEC_PREFIX)"
+    /etc/init.d/firewall reload || /etc/init.d/firewall restart
+    logger "${prefix:-$SEC_PREFIX_DEFAULT} TEST: security logging active"
+    log "Security logging enabled"
   else
-    if uci -q show firewall.wtsec_log >/dev/null 2>&1; then
-      uci set firewall.wtsec_log.enabled='0'
-      uci commit firewall
-      /etc/init.d/firewall reload >/dev/null 2>&1 || true
-    fi
+    uci set firewall.wtsec_log.enabled='0'
+    uci commit firewall
+    /etc/init.d/firewall reload || true
     log "Security logging disabled"
   fi
 }
 
 handle_config() {
-  # Pull config from controller and apply
-  json=$(curl $CURL_OPTS_COMMON -H "X-API-Token: $TOKEN" -H "X-MAC: $MAC" \
-               -X GET "$CONTROLLER_URL/config" 2>/dev/null)
-  [ -n "$json" ] || { log "No config (empty)"; return 0; }
+  [ ! -f "$TOKEN_FILE" ] && return
+  TOKEN="$(cat "$TOKEN_FILE")"
+  json=$(curl $CURL_OPTS_COMMON -H "X-API-Token: $TOKEN" -H "X-MAC: $MAC" -X GET "$CONTROLLER_URL/config")
+  [ -n "$json" ] || { log "No config"; return 0; }
 
-  pkg=$(echo "$json" | jq -c '.package // {}' 2>/dev/null)
-  [ -n "$pkg" ] || { log "No package in config"; return 0; }
+  pkg=$(echo "$json" | jq -c '.package // {}')
+  [ -n "$pkg" ] || { log "No package"; return 0; }
 
-  # Optional apps: only opkg update when needed
-  apps_count=$(echo "$pkg" | jq -r '(.apps // []) | length' 2>/dev/null)
-  if [ "$apps_count" -gt 0 ]; then
-    log "Apps requested: $apps_count → opkg update"
-    timeout 25 opkg update >/dev/null 2>&1 || log "opkg update timed out/failed"
-    echo "$pkg" | jq -r '.apps[]?' | while IFS= read -r app; do
-      [ -n "$app" ] || continue
-      if opkg list-installed "$app" >/dev/null 2>&1; then
-        log "$app already installed"
-      else
-        log "Installing $app"
-        timeout 60 opkg install "$app" >/dev/null 2>&1 || log "Install failed/timeout: $app"
-      fi
-    done
-  fi
-
-  # Firewall profile
-  prof=$(echo "$pkg" | jq -r '.firewall_profile // empty' 2>/dev/null)
+  prof=$(echo "$pkg" | jq -r '.firewall_profile // empty')
   [ -n "$prof" ] && apply_firewall_profile "$prof"
 
-  # Security logging
-  sec_enabled=$(echo "$pkg" | jq -r '.security_logging.enabled // false' 2>/dev/null)
-  sec_level=$(echo   "$pkg" | jq -r '.security_logging.level   // "info"' 2>/dev/null)
-  sec_prefix=$(echo  "$pkg" | jq -r '.security_logging.prefix  // "'"$SEC_PREFIX_DEFAULT"'"' 2>/dev/null)
-  [ "$sec_enabled" = "true" ] || [ "$sec_enabled" = "false" ] || sec_enabled=false
-  ensure_security_logging_rule "$sec_enabled" "$sec_level" "$sec_prefix"
+  sec_enabled=$(echo "$pkg" | jq -r '.security_logging.enabled // false')
+  sec_prefix=$(echo "$pkg" | jq -r '.security_logging.prefix // "'"$SEC_PREFIX_DEFAULT"'"')
+  ensure_security_logging_rule "$sec_enabled" "$sec_prefix"
 }
 
-# =============================
-# Main loop
-# =============================
+# ========== Main ==========
+lockfile="/var/run/wiretide-agent.lock"
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$lockfile"
+  flock -n 9 || { log "Already running – exiting"; exit 0; }
+else
+  if [ -e "$lockfile" ]; then
+    oldpid=$(cat "$lockfile" 2>/dev/null)
+    [ -n "$oldpid" ] && kill -0 "$oldpid" 2>/dev/null && { log "Instance $oldpid active – exiting"; exit 0; }
+  fi
+  echo $$ > "$lockfile"
+fi
+
+read_conf_if_exists
+CONTROLLER_URL="$(cat "$CTRL_FILE" 2>/dev/null)"
+[ -n "$CONTROLLER_URL" ] || CONTROLLER_URL="https://127.0.0.1"
+MAC="$(normalize_mac "$(get_mac)")"
+HOSTNAME="$(get_hostname)"
+DEVICE_TYPE="${DEVICE_TYPE:-router}"
+
+log "Starting $VERSION (PID $$)"
+log "Controller=$CONTROLLER_URL, MAC=$MAC, Hostname=$HOSTNAME, Interval=${INTERVAL}s"
+
 while true; do
   send_status || log "Status post failed"
-  handle_config || log "Config apply failed"
+  handle_config || log "Config fetch failed"
   sleep "$INTERVAL"
 done
+

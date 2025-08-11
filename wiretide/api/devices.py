@@ -52,7 +52,7 @@ async def register_device(device: DeviceRegistration, request: Request):
         await db.commit()
     return {"status": "ok"}
 
-@router.post("/status")
+@router.post("/status", dependencies=[Depends(require_api_token)])
 async def accept_status(payload: dict = Body(...)):
     mac = (payload.get("mac") or "").lower()
     if not mac:
@@ -139,29 +139,55 @@ async def accept_status(payload: dict = Body(...)):
         await db.commit()
 
     return {"status": "ok", "mac": mac, "events": len(sec_list), "profile": fw_profile}
+    
 @router.get("/config")
 async def get_config(request: Request, _: str = Depends(require_api_token)):
-    mac = request.headers.get("X-MAC", "").lower()
+    """Return queued package for an approved device (most-recent)."""
+    mac = (request.headers.get("X-MAC") or "").lower().strip()
     if not mac:
-        raise HTTPException(status_code=401)
+        raise HTTPException(status_code=401, detail="Missing X-MAC")
+
     async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("SELECT approved FROM devices WHERE mac = ?", (mac,))
-        row = await cursor.fetchone()
+        cur = await db.execute("SELECT approved FROM devices WHERE mac = ?", (mac,))
+        row = await cur.fetchone()
         if not row or not row[0]:
             raise HTTPException(status_code=403, detail="Unauthorized or unapproved")
-        cursor = await db.execute("SELECT config FROM device_configs WHERE mac = ?", (mac,))
+
+        
+        cur = await db.execute(
+            "SELECT config FROM device_configs WHERE mac = ? ORDER BY created_at DESC LIMIT 1",
+            (mac,),
+        )
+        row = await cur.fetchone()
+
+    if not row or not row[0]:
+        return JSONResponse({"package": {}, "available": False, "sha256": None})
+
+    try:
+        cfg = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+        pkg = cfg.get("package", {}) if isinstance(cfg, dict) else {}
+        sha = cfg.get("sha256") if isinstance(cfg, dict) else None
+        return JSONResponse({"package": pkg, "available": True, "sha256": sha})
+    except Exception:
+        return JSONResponse({"package": {}, "available": False, "sha256": None})
+
+async def require_api_token(request: Request):
+    token = request.headers.get("X-API-Token")
+    if not token:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[len("Bearer "):].strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Missing API token")
+
+    token = token.strip()
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT value FROM config WHERE key = 'shared_token'")
         row = await cursor.fetchone()
-        if not row:
-            return JSONResponse({"package": {}, "available": False})
-        try:
-            config_data = json.loads(row[0])
-            return JSONResponse({
-                "package": config_data.get("package", {}),
-                "sha256": config_data.get("sha256", ""),
-                "available": True
-            })
-        except Exception:
-            return JSONResponse({"package": {}, "available": False})
+        db_token = (row[0] if row else "").strip()
+        if token != db_token:
+            raise HTTPException(status_code=403, detail="Invalid API token")
+
 
 @router.get("/api/devices")
 async def list_devices(_: str = Depends(require_login)):
