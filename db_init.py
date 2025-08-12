@@ -23,10 +23,17 @@ CREATE TABLE IF NOT EXISTS devices (
     approved INTEGER DEFAULT 0,
     status_json TEXT,
     agent_update_allowed BOOLEAN DEFAULT 0,
-    agent_version TEXT DEFAULT '0.1.0'
+    agent_version TEXT DEFAULT '0.5.5'
 );
 """)
 
+
+# helper: voeg kolom toe als die ontbreekt
+def ensure_column(cursor, table, name, coltype):
+    cursor.execute(f"PRAGMA table_info({table})")
+    cols = [r[1] for r in cursor.fetchall()]
+    if name not in cols:
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {name} {coltype}")
 
 # --- Device status table ---
 cursor.execute("""
@@ -37,9 +44,15 @@ CREATE TABLE IF NOT EXISTS device_status (
     dns_servers TEXT,
     ntp_synced INTEGER,
     firewall_state TEXT,
+    firewall_profile_active TEXT,      -- NIEUW
+    security_log_samples TEXT,         -- NIEUW (JSON string)
     updated_at TIMESTAMP
 );
 """)
+
+ensure_column(cursor, "device_status", "firewall_profile_active", "TEXT")
+ensure_column(cursor, "device_status", "security_log_samples", "TEXT")
+
 
 # --- Device configs table ---
 cursor.execute("""
