@@ -4,18 +4,6 @@ set -e
 # Set default branch if not explicitly passed
 BRANCH="${WIRETIDE_BRANCH:-beta}"
 echo "[*] Installing from branch: $BRANCH"
-if [ "$BRANCH" = "main" ]; then
-    echo "==> PRODUCTION INSTALL"
-    WIRETIDE_DIR="/opt/wiretide"
-
-    LOG_FILE="/var/log/wiretide.log"
-    SYSTEMD_SERVICE="/etc/systemd/system/wiretide.service"
-else
-    echo "==> DEVELOPMENT INSTALL — beta branch"
-    WIRETIDE_DIR="/opt/wiretide-beta"
-    LOG_FILE="/var/log/wiretide-beta.log"
-    SYSTEMD_SERVICE="/etc/systemd/system/wiretide-beta.service"
-fi
 
 CONFIG_DIR="/etc/wiretide"
 CERT_DIR="$WIRETIDE_DIR/certs"
@@ -71,7 +59,7 @@ fi
 if [ ! -f "$DB_FILE" ]; then
     echo "[*] Creating SQLite database..."
     source venv/bin/activate
-    sudo -u "$SERVICE_USER" env PATH="$WIRETIDE_DIR/venv/bin:$PATH" WIRETIDE_BRANCH="$BRANCH" python db_init.py
+    sudo -u "$SERVICE_USER" env PATH="$WIRETIDE_DIR/venv/bin:$PATH" python db_init.py
     deactivate
 fi
 
@@ -129,7 +117,7 @@ chmod 644 "$CERT_DIR"/*.crt
 
 cp "$CERT_DIR/wiretide-ca.crt" "$STATIC_DIR/ca.crt"
 chown "$SERVICE_USER:$SERVICE_GROUP" "$STATIC_DIR/ca.crt"
-chmod o+x /opt "$WIRETIDE_DIR" "$STATIC_DIR"
+chmod o+x /opt /opt/wiretide /opt/wiretide/wiretide /opt/wiretide/wiretide/static
 
 #----------------------------------------
 echo "[*] Preparing agent static files..."
@@ -209,7 +197,7 @@ echo "$SERVICE_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart wiretide.serv
 chmod 440 /etc/sudoers.d/wiretide-restart
 
 systemctl daemon-reload
-systemctl enable --now "$(basename "$SYSTEMD_SERVICE")"
+systemctl enable --now wiretide
 
 #----------------------------------------
 echo "==========================================="
