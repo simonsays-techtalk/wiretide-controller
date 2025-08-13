@@ -71,7 +71,7 @@ fi
 if [ ! -f "$DB_FILE" ]; then
     echo "[*] Creating SQLite database..."
     source venv/bin/activate
-    sudo -u "$SERVICE_USER" env PATH="$WIRETIDE_DIR/venv/bin:$PATH" python db_init.py
+    sudo -u "$SERVICE_USER" env PATH="$WIRETIDE_DIR/venv/bin:$PATH" WIRETIDE_BRANCH="$BRANCH" python db_init.py
     deactivate
 fi
 
