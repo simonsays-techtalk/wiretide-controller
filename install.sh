@@ -209,7 +209,7 @@ echo "$SERVICE_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart wiretide.serv
 chmod 440 /etc/sudoers.d/wiretide-restart
 
 systemctl daemon-reload
-systemctl enable --now wiretide
+systemctl enable --now "$(basename "$SYSTEMD_SERVICE")"
 
 #----------------------------------------
 echo "==========================================="
