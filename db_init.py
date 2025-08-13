@@ -2,7 +2,11 @@ import sqlite3
 import os
 from passlib.hash import bcrypt
 
-DB_PATH = "/opt/wiretide/wiretide.db"
+branch = os.getenv("WIRETIDE_BRANCH", "main")
+if branch == "beta":
+    DB_PATH = "/opt/wiretide-beta/wiretide.db"
+else:
+    DB_PATH = "/opt/wiretide/wiretide.db"
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 conn = sqlite3.connect(DB_PATH)

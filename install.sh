@@ -6,22 +6,26 @@ BRANCH="${WIRETIDE_BRANCH:-beta}"
 echo "[*] Installing from branch: $BRANCH"
 if [ "$BRANCH" = "main" ]; then
     echo "==> PRODUCTION INSTALL"
+    WIRETIDE_DIR="/opt/wiretide"
+
+    LOG_FILE="/var/log/wiretide.log"
+    SYSTEMD_SERVICE="/etc/systemd/system/wiretide.service"
 else
     echo "==> DEVELOPMENT INSTALL — beta branch"
+    WIRETIDE_DIR="/opt/wiretide-beta"
+    LOG_FILE="/var/log/wiretide-beta.log"
+    SYSTEMD_SERVICE="/etc/systemd/system/wiretide-beta.service"
 fi
 
-WIRETIDE_DIR="/opt/wiretide"
 CONFIG_DIR="/etc/wiretide"
 CERT_DIR="$WIRETIDE_DIR/certs"
 STATIC_DIR="$WIRETIDE_DIR/wiretide/static"
 AGENT_DIR="$STATIC_DIR/agent"
 DB_FILE="$WIRETIDE_DIR/wiretide.db"
-LOG_FILE="/var/log/wiretide.log"
 REPO_URL="https://github.com/simonsays-techtalk/wiretide-controller.git"
 PYTHON_BIN="/usr/bin/python3"
 SERVICE_USER="wiretide"
 SERVICE_GROUP="wiretide"
-SYSTEMD_SERVICE="/etc/systemd/system/wiretide.service"
 
 #----------------------------------------
 echo "[*] Installing Wiretide Controller (dedicated '$SERVICE_USER' user, clean install)..."
@@ -219,4 +223,3 @@ echo "API Token (for agents): $API_TOKEN"
 echo "CA Download: https://$IP/ca.crt"
 echo "Agent Installer: http://$IP/static/agent/install.sh"
 echo "==========================================="
-
