@@ -1,10 +1,14 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-# Set default branch if not explicitly passed
+# Branch only selects which Git branch to clone (content). It does NOT change paths/service names.
 BRANCH="${WIRETIDE_BRANCH:-beta}"
-echo "[*] Installing from branch: $BRANCH"
+echo "[*] Installing from branch: ${BRANCH}"
 
+# Fixed paths & names (branch-neutral)
+WIRETIDE_DIR="/opt/wiretide"
+LOG_FILE="/var/log/wiretide.log"
+SYSTEMD_SERVICE="/etc/systemd/system/wiretide.service"
 CONFIG_DIR="/etc/wiretide"
 CERT_DIR="$WIRETIDE_DIR/certs"
 STATIC_DIR="$WIRETIDE_DIR/wiretide/static"
@@ -15,7 +19,6 @@ PYTHON_BIN="/usr/bin/python3"
 SERVICE_USER="wiretide"
 SERVICE_GROUP="wiretide"
 
-#----------------------------------------
 echo "[*] Installing Wiretide Controller (dedicated '$SERVICE_USER' user, clean install)..."
 
 apt update && apt install -y nginx python3-venv python3-pip sqlite3 openssl git curl
@@ -25,11 +28,15 @@ if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
     useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
 fi
 
+# Ensure parent dir exists
+mkdir -p "$(dirname "$WIRETIDE_DIR")"
+
 if [ -d "$WIRETIDE_DIR" ]; then
     echo "[*] Removing existing installation at $WIRETIDE_DIR"
     rm -rf "$WIRETIDE_DIR"
 fi
 
+# Clone selected branch content into fixed path
 git clone --branch "$BRANCH" "$REPO_URL" "$WIRETIDE_DIR"
 
 mkdir -p "$CERT_DIR" "$STATIC_DIR" "$AGENT_DIR"
@@ -49,6 +56,7 @@ pip install --upgrade pip
 pip install -r requirements.txt
 deactivate
 
+# Minimal asset to avoid missing logo
 if [ ! -f "$STATIC_DIR/wiretide_logo.png" ]; then
     base64 -d > "$STATIC_DIR/wiretide_logo.png" <<'EOF'
 iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAEklEQVR42mP8z8BQDwADgwHBEdkDTwAAAABJRU5ErkJggg==
@@ -56,15 +64,16 @@ EOF
     chown "$SERVICE_USER:$SERVICE_GROUP" "$STATIC_DIR/wiretide_logo.png"
 fi
 
+# Create DB (force branch-neutral path by exporting WIRETIDE_BRANCH=main)
 if [ ! -f "$DB_FILE" ]; then
     echo "[*] Creating SQLite database..."
     source venv/bin/activate
-    sudo -u "$SERVICE_USER" env PATH="$WIRETIDE_DIR/venv/bin:$PATH" python db_init.py
+    sudo -u "$SERVICE_USER" env PATH="$WIRETIDE_DIR/venv/bin:$PATH" WIRETIDE_BRANCH="main" python db_init.py
     deactivate
 fi
 
-chmod 660 "$DB_FILE"
-chown "$SERVICE_USER:$SERVICE_GROUP" "$DB_FILE"
+chmod 660 "$DB_FILE" || true
+chown "$SERVICE_USER:$SERVICE_GROUP" "$DB_FILE" || true
 chmod 770 "$WIRETIDE_DIR"
 
 mkdir -p "$(dirname "$LOG_FILE")"
@@ -72,20 +81,20 @@ touch "$LOG_FILE"
 chown "$SERVICE_USER:$SERVICE_GROUP" "$LOG_FILE"
 chmod 660 "$LOG_FILE"
 
+# Seed API token if missing
 API_TOKEN=$(sqlite3 "$DB_FILE" "SELECT token FROM tokens LIMIT 1;" || true)
-if [ -z "$API_TOKEN" ]; then
+if [ -z "${API_TOKEN}" ]; then
     API_TOKEN=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 32)
     sqlite3 "$DB_FILE" "INSERT INTO tokens (token, description) VALUES ('$API_TOKEN', 'Default API Token');"
     echo "[*] Generated new API token for /register and /status"
 fi
 
-#----------------------------------------
+# TLS
 echo "[*] Setting up CA and SAN-enabled TLS cert..."
 IP=$(hostname -I | awk '{print $1}')
 if [ ! -f "$CERT_DIR/wiretide-ca.crt" ]; then
     openssl genrsa -out "$CERT_DIR/wiretide-ca.key" 4096
-    openssl req -x509 -new -nodes -key "$CERT_DIR/wiretide-ca.key" -sha256 -days 3650 \
-      -subj "/CN=Wiretide Root CA" -out "$CERT_DIR/wiretide-ca.crt"
+    openssl req -x509 -new -nodes -key "$CERT_DIR/wiretide-ca.key" -sha256 -days 3650       -subj "/CN=Wiretide Root CA" -out "$CERT_DIR/wiretide-ca.crt"
 fi
 
 cat > "$CERT_DIR/openssl-san.cnf" <<EOF
@@ -108,8 +117,7 @@ EOF
 
 openssl genrsa -out "$CERT_DIR/wiretide.key" 4096
 openssl req -new -key "$CERT_DIR/wiretide.key" -out "$CERT_DIR/wiretide.csr" -config "$CERT_DIR/openssl-san.cnf"
-openssl x509 -req -in "$CERT_DIR/wiretide.csr" -CA "$CERT_DIR/wiretide-ca.crt" -CAkey "$CERT_DIR/wiretide-ca.key" \
-  -CAcreateserial -out "$CERT_DIR/wiretide.crt" -days 825 -sha256 -extensions v3_req -extfile "$CERT_DIR/openssl-san.cnf"
+openssl x509 -req -in "$CERT_DIR/wiretide.csr" -CA "$CERT_DIR/wiretide-ca.crt" -CAkey "$CERT_DIR/wiretide-ca.key"   -CAcreateserial -out "$CERT_DIR/wiretide.crt" -days 825 -sha256 -extensions v3_req -extfile "$CERT_DIR/openssl-san.cnf"
 
 chown "$SERVICE_USER:$SERVICE_GROUP" "$CERT_DIR"/*.key "$CERT_DIR"/*.crt
 chmod 640 "$CERT_DIR"/*.key
@@ -117,21 +125,21 @@ chmod 644 "$CERT_DIR"/*.crt
 
 cp "$CERT_DIR/wiretide-ca.crt" "$STATIC_DIR/ca.crt"
 chown "$SERVICE_USER:$SERVICE_GROUP" "$STATIC_DIR/ca.crt"
-chmod o+x /opt /opt/wiretide /opt/wiretide/wiretide /opt/wiretide/wiretide/static
 
-#----------------------------------------
+# ensure world-exec on path components for static files
+chmod o+x /opt "$WIRETIDE_DIR" "$STATIC_DIR" || true
+
+# Agent static
 echo "[*] Preparing agent static files..."
-
 if [ ! -f "$AGENT_DIR/install.template.sh" ]; then
     echo "❌ Missing required file: $AGENT_DIR/install.template.sh"
     exit 1
 fi
-
 sed "s|__CONTROLLER_URL__|https://$IP|g" "$AGENT_DIR/install.template.sh" > "$AGENT_DIR/install.sh"
 chmod +x "$AGENT_DIR/install.sh" "$AGENT_DIR/wiretide-agent-run" "$AGENT_DIR/wiretide-init"
 chown -R "$SERVICE_USER:$SERVICE_GROUP" "$AGENT_DIR"
 
-#----------------------------------------
+# Nginx
 cat > /etc/nginx/sites-available/wiretide <<EOF
 server {
     listen 443 ssl;
@@ -172,7 +180,7 @@ ln -sf /etc/nginx/sites-available/wiretide /etc/nginx/sites-enabled/wiretide
 rm -f /etc/nginx/sites-enabled/default
 systemctl restart nginx
 
-#----------------------------------------
+# Systemd (absolute path to uvicorn in venv)
 cat > "$SYSTEMD_SERVICE" <<EOF
 [Unit]
 Description=Wiretide Controller
@@ -182,9 +190,9 @@ After=network.target
 User=$SERVICE_USER
 Group=$SERVICE_GROUP
 WorkingDirectory=$WIRETIDE_DIR
-ExecStart=/usr/bin/env uvicorn wiretide.main:app --host 127.0.0.1 --port 8000
+ExecStart=$WIRETIDE_DIR/venv/bin/uvicorn wiretide.main:app --host 127.0.0.1 --port 8000
 Restart=always
-Environment="PATH=$WIRETIDE_DIR/venv/bin:/usr/bin:/bin"
+Environment=PATH=$WIRETIDE_DIR/venv/bin:/usr/bin:/bin
 StandardOutput=append:$LOG_FILE
 StandardError=append:$LOG_FILE
 
@@ -199,7 +207,6 @@ chmod 440 /etc/sudoers.d/wiretide-restart
 systemctl daemon-reload
 systemctl enable --now wiretide
 
-#----------------------------------------
 echo "==========================================="
 echo " Wiretide Controller Installed (Clean)"
 echo "-------------------------------------------"
