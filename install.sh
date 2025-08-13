@@ -129,7 +129,7 @@ chmod 644 "$CERT_DIR"/*.crt
 
 cp "$CERT_DIR/wiretide-ca.crt" "$STATIC_DIR/ca.crt"
 chown "$SERVICE_USER:$SERVICE_GROUP" "$STATIC_DIR/ca.crt"
-chmod o+x /opt /opt/wiretide /opt/wiretide/wiretide /opt/wiretide/wiretide/static
+chmod o+x /opt "$WIRETIDE_DIR" "$STATIC_DIR"
 
 #----------------------------------------
 echo "[*] Preparing agent static files..."
