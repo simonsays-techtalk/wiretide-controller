@@ -3,7 +3,7 @@
 # Version: 2025.08.14-fwsec12a
 # Preserves all fwsec11 functions; adds register + robust token bootstrap
 
-VERSION="Wiretide Agent v2025.08.14-fwsec12a"
+VERSION="Wiretide Agent v2025.08.14-fwsec12b"
 LOG_FILE="/tmp/wiretide-debug.log"
 INTERVAL="${INTERVAL:-60}"
 CA_CERT="${CA_CERT:-/etc/wiretide-ca.crt}"
@@ -36,6 +36,48 @@ get_mac() {
   [ -r /sys/class/net/br-lan/address ] && { cat /sys/class/net/br-lan/address; return; }
   ip link show dev eth0 2>/dev/null | awk '/ether/{print $2; exit}';
 }
+
+sha256_str() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$1" | sha256sum | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    printf '%s' "$1" | openssl dgst -sha256 | awk '{print $2}'
+  else
+    echo ""
+  fi
+}
+
+verify_pkg_sha() {
+  pkg_json_str="$1"   # lege string toegestaan
+  sha_srv="$2"
+  pkg_obj_compact="$3"  # compacte objectstring of leeg
+
+  [ -z "$sha_srv" ] && { log "⚠️ No sha256 in config; skipping verification"; return 0; }
+
+  # 1) raw string hash
+  if [ -n "$pkg_json_str" ]; then
+    h_raw="$(sha256_str "$pkg_json_str")"
+    [ "$h_raw" = "$sha_srv" ] && { log "✅ Package SHA256 OK (raw string)"; return 0; }
+  fi
+
+  # 2) canonicalized string hash
+  if [ -n "$pkg_json_str" ] && command -v jq >/dev/null 2>&1; then
+    canon_str="$(printf '%s' "$pkg_json_str" | jq -cS '.' 2>/dev/null || printf '%s' "$pkg_json_str")"
+    h_canon_str="$(sha256_str "$canon_str")"
+    [ "$h_canon_str" = "$sha_srv" ] && { log "✅ Package SHA256 OK (canon string)"; return 0; }
+  fi
+
+  # 3) canonicalized object hash
+  if [ -n "$pkg_obj_compact" ] && command -v jq >/dev/null 2>&1; then
+    canon_obj="$(printf '%s' "$pkg_obj_compact" | jq -cS '.' 2>/dev/null || printf '%s' "$pkg_obj_compact")"
+    h_canon_obj="$(sha256_str "$canon_obj")"
+    [ "$h_canon_obj" = "$sha_srv" ] && { log "✅ Package SHA256 OK (object)"; return 0; }
+  fi
+
+  log "❌ Package SHA mismatch; skipping (srv=$sha_srv)"
+  return 1
+}
+
 
 get_hostname() {
   uci -q get system.@system[0].hostname 2>/dev/null || uname -n
@@ -138,7 +180,7 @@ build_payload() {
 JSON
 }
 
-# --- NEW: initial registration ---
+
 register_device() {
   ssh_fp="unknown"
   if [ -f /etc/dropbear/dropbear_rsa_host_key ] && command -v dropbearkey >/dev/null 2>&1; then
@@ -227,26 +269,81 @@ send_status() {
   return 0
 }
 
+
+apply_firewall_profile() {
+  prof="$1"
+  [ -n "$prof" ] || return 0
+  echo "$prof" > "$FW_PROFILE_FILE"
+  sync
+  log "Applied firewall profile: $prof"
+}
+
+apply_apps_from_pkg() {
+  # Verwacht $1 = compacte JSON string van het package-object
+  pkg_json="$1"
+  command -v jq >/dev/null 2>&1 || { log "jq not present; skip apps"; return 0; }
+
+  apps=$(printf '%s' "$pkg_json" | jq -r '.apps[]?' 2>/dev/null)
+  [ -z "$apps" ] && { log "No apps specified"; return 0; }
+
+  for app in $apps; do
+    case "$app" in
+      adblock|banip)
+        if opkg list-installed "$app" >/dev/null 2>&1; then
+          log "$app already installed"
+        else
+          log "Installing $app..."
+          opkg update >/dev/null 2>&1 || true
+          out=$(opkg install "$app" 2>&1)
+          log "$app install result:\n$out"
+        fi
+        ;;
+      *)
+        log "Ignoring unsupported app: $app"
+        ;;
+    esac
+  done
+}
+
 handle_config() {
   [ ! -f "$TOKEN_FILE" ] && return 0
   TOKEN="$(cat "$TOKEN_FILE")"
-  json=$(curl $CURL_OPTS_COMMON -H "X-API-Token: $TOKEN" -H "X-MAC: $MAC" -X GET "$CONTROLLER_URL/config")
-  [ -n "$json" ] || { log "No config"; return 0; }
+  raw=$(curl $CURL_OPTS_COMMON -H "X-API-Token: $TOKEN" -H "X-MAC: $MAC" -X GET "$CONTROLLER_URL/config")
+  [ -n "$raw" ] || { log "No config"; return 0; }
 
-  if command -v jq >/dev/null 2>&1; then
-    pkg=$(echo "$json" | jq -c '.package // {}')
-  else
-    pkg="{}"
+  command -v jq >/dev/null 2>&1 || { log "jq not present; skipping config apply"; return 0; }
+
+  pkg_json_str=$(printf '%s' "$raw" | jq -r 'try .package_json catch empty')
+  pkg_obj_compact=$(printf '%s' "$raw" | jq -c 'try .package catch {}')
+  sha_srv=$(printf '%s' "$raw" | jq -r 'try .sha256 catch empty')
+
+  if ! verify_pkg_sha "$pkg_json_str" "$sha_srv" "$pkg_obj_compact"; then
+    return 0
   fi
-  [ -n "$pkg" ] || { log "No package"; return 0; }
 
-  prof=$(echo "$pkg" | jq -r '.firewall_profile // empty' 2>/dev/null || echo "")
-  [ -n "$prof" ] && echo "$prof" > "$FW_PROFILE_FILE" && sync && log "Applied firewall profile: $prof"
+  # Kies bron: geef voorrang aan expliciete string; anders object
+  if [ -n "$pkg_json_str" ]; then
+    pkg_compact="$(printf '%s' "$pkg_json_str" | jq -c '.')"
+  else
+    pkg_compact="$pkg_obj_compact"
+  fi
 
-  sec_enabled=$(echo "$pkg" | jq -r '.security_logging.enabled // false' 2>/dev/null || echo "false")
-  sec_prefix=$(echo "$pkg" | jq -r '.security_logging.prefix // "'"$SEC_PREFIX_DEFAULT"'"' 2>/dev/null || echo "$SEC_PREFIX_DEFAULT")
+  # Firewall-profiel
+  prof=$(printf '%s' "$pkg_compact" | jq -r 'try .firewall_profile catch empty')
+  [ -n "$prof" ] && apply_firewall_profile "$prof"
+
+  # Security logging
+  sec_enabled=$(printf '%s' "$pkg_compact" | jq -r 'try .security_logging.enabled catch false')
+  sec_prefix=$(printf '%s' "$pkg_compact" | jq -r 'try .security_logging.prefix catch "'"$SEC_PREFIX_DEFAULT"'"')
   ensure_security_logging_rule "$sec_enabled" "$sec_prefix"
+
+  # Apps installeren (adblock/banip)
+  apply_apps_from_pkg "$pkg_compact"
+
+  log "Config applied."
+  return 0
 }
+
 
 ensure_security_logging_rule() {
   enabled="$1"; prefix="$2"
