@@ -1,9 +1,9 @@
 #!/bin/sh
-# Wiretide Agent – resilient loop + firewall logging + timeouts
-# Version: 2025.08.11-fwsec10
-# Target: OpenWrt BusyBox / ash
+# Wiretide Agent – full production + client reporting
+# Version: 2025.08.14-fwsec11
+# Combines: fwsec10 + clients + full payload logic
 
-VERSION="Wiretide Agent v2025.08.11+fwsec10"
+VERSION="Wiretide Agent v2025.08.14-fwsec11"
 LOG_FILE="/tmp/wiretide-debug.log"
 INTERVAL="${INTERVAL:-60}"
 CA_CERT="${CA_CERT:-/etc/wiretide-ca.crt}"
@@ -50,18 +50,19 @@ get_wan_ip() {
 
 get_dns_list() {
   if [ -s /tmp/resolv.conf.d/resolv.conf.auto ]; then
-    awk '/^nameserver/{print $2}' /tmp/resolv.conf.d/resolv.conf.auto | tr '\n' ',' | sed 's/,$//'
+    awk '/^nameserver/{print $2}' /tmp/resolv.conf.d/resolv.conf.auto
   else
-    awk '/^nameserver/{print $2}' /tmp/resolv.conf | tr '\n' ',' | sed 's/,$//'
-  fi
+    awk '/^nameserver/{print $2}' /tmp/resolv.conf
+  fi | jq -R . | jq -cs .
 }
+
 
 is_ntp_synced() {
   year=$(date +%Y 2>/dev/null)
   if [ "$year" -ge 2020 ]; then echo true; else echo false; fi
 }
 
-json_escape() { sed 's/\\/\\\\/g; s/"/\\"/g'; }
+json_escape() { sed 's/\\/\\\\/g; s/"/\\\"/g'; }
 
 security_log_samples_json() {
   prefix="$(cat "$FW_PREFIX_FILE" 2>/dev/null)"; [ -n "$prefix" ] || prefix="$SEC_PREFIX_DEFAULT"
@@ -72,15 +73,26 @@ security_log_samples_json() {
   fi
 }
 
+list_clients_json() {
+  if [ -f /tmp/dhcp.leases ]; then
+    awk '{
+      ip=$3; mac=$2; name=$4;
+      if (ip && mac) {
+        printf "{\"ip\":\"%s\",\"mac\":\"%s\",\"hostname\":\"%s\"},", ip, mac, name
+      }
+    }' /tmp/dhcp.leases | sed 's/,$//'
+  fi
+}
+
 build_payload() {
   ssh_enabled=false
   pgrep dropbear >/dev/null && [ -s /etc/dropbear/dropbear_rsa_host_key ] && ssh_enabled=true
 
-  dns_csv="$(get_dns_list)"
-  dns_json="[]"
-  [ -n "$dns_csv" ] && dns_json="[\"$(echo "$dns_csv" | sed 's/,/\",\"/g')\"]"
+  dns_json="$(get_dns_list)"
+  [ -n "$dns_json" ] || dns_json="[]"
 
   sec_json="$(security_log_samples_json)"; [ -n "$sec_json" ] || sec_json="[]"
+  clients_json="$(list_clients_json)"; [ -n "$clients_json" ] && clients_json="[$clients_json]" || clients_json="[]"
 
   model="$(cat /tmp/sysinfo/model 2>/dev/null)"; [ -n "$model" ] || model="unknown"
   ntp_ok="$(is_ntp_synced)"
@@ -100,8 +112,10 @@ build_payload() {
     "ntp": $ntp_ok,
     "firewall": true,
     "firewall_profile": "$(echo "$fw_profile_active" | json_escape)",
-    "security_log_samples": $sec_json
-  }
+    "security_log_samples": $sec_json,
+    "agent_version": "$VERSION"
+  },
+  "clients": $clients_json
 }
 JSON
 }
@@ -132,10 +146,7 @@ send_status() {
     return 1
   fi
 
-  HTTP_CODE=$(curl $CURL_OPTS_COMMON -o /dev/null -w '%{http_code}' \
-    -H "X-API-Token: $TOKEN" \
-    -H "Content-Type: application/json" \
-    -X POST "$CONTROLLER_URL/status" --data @"$PAYLOAD_FILE")
+  HTTP_CODE=$(curl $CURL_OPTS_COMMON -o /dev/null -w '%{http_code}'     -H "X-API-Token: $TOKEN"     -H "Content-Type: application/json"     -X POST "$CONTROLLER_URL/status" --data @"$PAYLOAD_FILE")
   log "Status update response: HTTP $HTTP_CODE"
 
   if [ "$HTTP_CODE" = "403" ]; then
@@ -144,10 +155,7 @@ send_status() {
     TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)"
     [ -n "$TOKEN" ] || { log "Refresh failed"; return 1; }
 
-    HTTP_CODE=$(curl $CURL_OPTS_COMMON -o /dev/null -w '%{http_code}' \
-      -H "X-API-Token: $TOKEN" \
-      -H "Content-Type: application/json" \
-      -X POST "$CONTROLLER_URL/status" --data @"$PAYLOAD_FILE")
+    HTTP_CODE=$(curl $CURL_OPTS_COMMON -o /dev/null -w '%{http_code}'       -H "X-API-Token: $TOKEN"       -H "Content-Type: application/json"       -X POST "$CONTROLLER_URL/status" --data @"$PAYLOAD_FILE")
     log "Retry status post: HTTP $HTTP_CODE"
     [ "$HTTP_CODE" = "200" ] || return 1
   elif [ "$HTTP_CODE" != "200" ]; then
@@ -158,12 +166,21 @@ send_status() {
   return 0
 }
 
-apply_firewall_profile() {
-  prof="$1"
-  [ -n "$prof" ] || return 0
-  echo "$prof" > "$FW_PROFILE_FILE"
-  sync
-  log "Applied firewall profile: $prof"
+handle_config() {
+  [ ! -f "$TOKEN_FILE" ] && return
+  TOKEN="$(cat "$TOKEN_FILE")"
+  json=$(curl $CURL_OPTS_COMMON -H "X-API-Token: $TOKEN" -H "X-MAC: $MAC" -X GET "$CONTROLLER_URL/config")
+  [ -n "$json" ] || { log "No config"; return 0; }
+
+  pkg=$(echo "$json" | jq -c '.package // {}')
+  [ -n "$pkg" ] || { log "No package"; return 0; }
+
+  prof=$(echo "$pkg" | jq -r '.firewall_profile // empty')
+  [ -n "$prof" ] && echo "$prof" > "$FW_PROFILE_FILE" && sync && log "Applied firewall profile: $prof"
+
+  sec_enabled=$(echo "$pkg" | jq -r '.security_logging.enabled // false')
+  sec_prefix=$(echo "$pkg" | jq -r '.security_logging.prefix // "'"$SEC_PREFIX_DEFAULT"'"')
+  ensure_security_logging_rule "$sec_enabled" "$sec_prefix"
 }
 
 ensure_security_logging_rule() {
@@ -195,52 +212,6 @@ ensure_security_logging_rule() {
   fi
 }
 
-handle_config() {
-  [ ! -f "$TOKEN_FILE" ] && return
-  TOKEN="$(cat "$TOKEN_FILE")"
-  json=$(curl $CURL_OPTS_COMMON -H "X-API-Token: $TOKEN" -H "X-MAC: $MAC" -X GET "$CONTROLLER_URL/config")
-  [ -n "$json" ] || { log "No config"; return 0; }
-
-  pkg=$(echo "$json" | jq -c '.package // {}')
-  [ -n "$pkg" ] || { log "No package"; return 0; }
-
-  prof=$(echo "$pkg" | jq -r '.firewall_profile // empty')
-  [ -n "$prof" ] && apply_firewall_profile "$prof"
-
-  sec_enabled=$(echo "$pkg" | jq -r '.security_logging.enabled // false')
-  sec_prefix=$(echo "$pkg" | jq -r '.security_logging.prefix // "'"$SEC_PREFIX_DEFAULT"'"')
-  ensure_security_logging_rule "$sec_enabled" "$sec_prefix"
-}
-
-apply_apps() {
-  [ ! -f "$TOKEN_FILE" ] && return
-  TOKEN="$(cat "$TOKEN_FILE")"
-  json=$(curl $CURL_OPTS_COMMON -H "X-API-Token: $TOKEN" -H "X-MAC: $MAC" -X GET "$CONTROLLER_URL/config")
-  [ -z "$json" ] && { log "No config for apps"; return; }
-
-  apps=$(echo "$json" | jq -r '.package.apps[]?' 2>/dev/null)
-  [ -z "$apps" ] && return
-
-  for app in $apps; do
-    case "$app" in
-      adblock|banip)
-        if opkg list-installed "$app" >/dev/null 2>&1; then
-          log "$app already installed"
-        else
-          log "Installing $app..."
-          opkg update >/dev/null 2>&1
-          out=$(opkg install "$app" 2>&1)
-          log "$app install result:\n$out"
-        fi
-        ;;
-      *)
-        log "Ignoring unsupported app: $app"
-        ;;
-    esac
-  done
-}
-
-
 # ========== Main ==========
 lockfile="/var/run/wiretide-agent.lock"
 if command -v flock >/dev/null 2>&1; then
@@ -269,4 +240,3 @@ while true; do
   handle_config || log "Config fetch failed"
   sleep "$INTERVAL"
 done
-

@@ -1,21 +1,39 @@
-from fastapi import APIRouter, Request, HTTPException, Form, Depends
+from fastapi import APIRouter, Request, HTTPException, Form, Depends, Body
 from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from datetime import timezone, datetime
-import json, enum, aiosqlite
-from fastapi import Body
-from fastapi.templating import Jinja2Templates
-
+import json, enum, aiosqlite, hashlib
 from wiretide.tokens import get_shared_token
 from wiretide.db import DB_PATH
-from wiretide.api.auth import require_login, require_api_token, rbac_required
+from wiretide.api.auth import require_login, rbac_required
 from wiretide.models import DeviceStatus
-
-from fastapi.responses import JSONResponse
-
+import logging
+logger = logging.getLogger("wiretide")
 
 templates = Jinja2Templates(directory="wiretide/templates")
 router = APIRouter()
+
+
+# --------------- Helpers ----------------
+
+async def require_api_token(request: Request):
+    token = request.headers.get("X-API-Token")
+    if not token:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[len("Bearer "):].strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Missing API token")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT value FROM config WHERE key = 'shared_token'")
+        row = await cursor.fetchone()
+    if not row or token.strip() != (row[0] or "").strip():
+        raise HTTPException(status_code=403, detail="Invalid API token")
+
+
+# --------------- Models ----------------
 
 class DeviceRegistration(BaseModel):
     hostname: str
@@ -29,6 +47,9 @@ class DeviceType(str, enum.Enum):
     switch = "switch"
     firewall = "firewall"
     access_point = "access_point"
+
+
+# --------------- Agent Routes ----------------
 
 @router.post("/register")
 async def register_device(device: DeviceRegistration, request: Request):
@@ -52,13 +73,32 @@ async def register_device(device: DeviceRegistration, request: Request):
         await db.commit()
     return {"status": "ok"}
 
+
 @router.post("/status", dependencies=[Depends(require_api_token)])
-async def accept_status(payload: dict = Body(...)):
+async def accept_status(request: Request):
+    # Log de ruwe body van de request naar bestand (voor debug)
+    raw_body = await request.body()
+    with open("/tmp/wt-debug-raw.txt", "wb") as f:
+        f.write(raw_body)
+
+    try:
+        payload = await request.json()
+    except Exception as e:
+        return JSONResponse(
+            {"error": "invalid json", "details": str(e)},
+            status_code=400
+        )
+
+    # Log succesvol geparste JSON
+    with open("/tmp/wt-debug-payload.json", "w") as f:
+        json.dump(payload, f, indent=2)
+
     mac = (payload.get("mac") or "").lower()
     if not mac:
         return JSONResponse({"error": "missing mac"}, status_code=400)
 
     s = payload.get("settings") or {}
+    clients_raw = payload.get("clients", [])
 
     def pick(*keys, default=None):
         for k in keys:
@@ -69,15 +109,14 @@ async def accept_status(payload: dict = Body(...)):
         return default
 
     model       = pick("model", default="unknown")
-    wan_ip      = pick("wan_ip", default=None)
+    wan_ip      = pick("wan_ip")
     dns         = pick("dns", "dns_servers", default=[])
     ntp         = pick("ntp", "ntp_synced", default=False)
     fw_state    = pick("firewall", "firewall_state", default=True)
-    fw_profile  = pick("firewall_profile", "firewall_profile_active", default=None)
+    fw_profile  = pick("firewall_profile", "firewall_profile_active")
     sec_raw     = pick("security_log_samples", default=[])
     ssh_enabled = bool(payload.get("ssh_enabled"))
 
-    # Normalize DNS -> list[str]
     if isinstance(dns, str):
         try:
             maybe = json.loads(dns)
@@ -89,7 +128,6 @@ async def accept_status(payload: dict = Body(...)):
     else:
         dns_list = []
 
-    # Normalize security logs -> list[str] (cap 50)
     if isinstance(sec_raw, list):
         sec_list = [str(x) for x in sec_raw][-50:]
     elif isinstance(sec_raw, str):
@@ -97,16 +135,20 @@ async def accept_status(payload: dict = Body(...)):
     else:
         sec_list = []
 
+    if isinstance(clients_raw, list):
+        clients_json = json.dumps(clients_raw[:100])
+    else:
+        clients_json = json.dumps([])
+
     updated_at = datetime.now(timezone.utc).isoformat()
 
     async with aiosqlite.connect(DB_PATH) as db:
-        # Upsert live status
         await db.execute(
             """
             INSERT INTO device_status (
                 mac, model, wan_ip, dns_servers, ntp_synced, firewall_state,
-                firewall_profile_active, security_log_samples, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                firewall_profile_active, security_log_samples, updated_at, clients
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(mac) DO UPDATE SET
                 model=excluded.model,
                 wan_ip=excluded.wan_ip,
@@ -115,34 +157,35 @@ async def accept_status(payload: dict = Body(...)):
                 firewall_state=excluded.firewall_state,
                 firewall_profile_active=excluded.firewall_profile_active,
                 security_log_samples=excluded.security_log_samples,
+                clients=excluded.clients,
                 updated_at=excluded.updated_at
             """,
             (
                 mac,
-                str(model) if model is not None else None,
-                str(wan_ip) if wan_ip is not None else None,
+                str(model),
+                str(wan_ip) if wan_ip else None,
                 json.dumps(dns_list),
-                1 if ntp else 0,
-                str(fw_state) if fw_state is not None else None,
-                str(fw_profile) if fw_profile is not None else None,
+                int(ntp),
+                str(fw_state),
+                str(fw_profile) if fw_profile else None,
                 json.dumps(sec_list),
                 updated_at,
-            ),
+                clients_json
+            )
         )
 
-        # 👉 Fix 2: update ook devices.last_seen (en ssh_enabled)
         await db.execute(
             "UPDATE devices SET last_seen = ?, ssh_enabled = ? WHERE mac = ?",
-            (updated_at, 1 if ssh_enabled else 0, mac),
+            (updated_at, int(ssh_enabled), mac),
         )
 
         await db.commit()
 
-    return {"status": "ok", "mac": mac, "events": len(sec_list), "profile": fw_profile}
-    
-@router.get("/config")
-async def get_config(request: Request, _: str = Depends(require_api_token)):
-    """Return queued package for an approved device (most-recent)."""
+    return {"status": "ok", "mac": mac, "clients": len(json.loads(clients_json)), "profile": fw_profile}
+
+
+@router.get("/config", dependencies=[Depends(require_api_token)])
+async def get_config(request: Request):
     mac = (request.headers.get("X-MAC") or "").lower().strip()
     if not mac:
         raise HTTPException(status_code=401, detail="Missing X-MAC")
@@ -153,10 +196,9 @@ async def get_config(request: Request, _: str = Depends(require_api_token)):
         if not row or not row[0]:
             raise HTTPException(status_code=403, detail="Unauthorized or unapproved")
 
-        
         cur = await db.execute(
             "SELECT config FROM device_configs WHERE mac = ? ORDER BY created_at DESC LIMIT 1",
-            (mac,),
+            (mac,)
         )
         row = await cur.fetchone()
 
@@ -171,23 +213,42 @@ async def get_config(request: Request, _: str = Depends(require_api_token)):
     except Exception:
         return JSONResponse({"package": {}, "available": False, "sha256": None})
 
-async def require_api_token(request: Request):
-    token = request.headers.get("X-API-Token")
-    if not token:
-        auth_header = request.headers.get("Authorization", "")
-        if auth_header.startswith("Bearer "):
-            token = auth_header[len("Bearer "):].strip()
-    if not token:
-        raise HTTPException(status_code=400, detail="Missing API token")
 
-    token = token.strip()
+@router.get("/config/agent", dependencies=[Depends(require_api_token)])
+async def get_agent_update_config(request: Request):
+    mac = request.headers.get("X-MAC", "").lower()
+    if not mac:
+        raise HTTPException(status_code=401)
+
     async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("SELECT value FROM config WHERE key = 'shared_token'")
+        cursor = await db.execute("SELECT agent_update_allowed FROM devices WHERE mac = ?", (mac,))
         row = await cursor.fetchone()
-        db_token = (row[0] if row else "").strip()
-        if token != db_token:
-            raise HTTPException(status_code=403, detail="Invalid API token")
+        if not row:
+            raise HTTPException(status_code=404, detail="Device not found")
+        per_device_allowed = bool(row[0])
 
+    from wiretide.api.settings import get_config_value
+    updates_enabled = await get_config_value("agent_updates_enabled", "false") == "true"
+    update_url = await get_config_value("agent_update_url", "")
+    min_supported_version = await get_config_value("min_supported_agent_version", "0.1.0")
+
+    allow_update = updates_enabled or per_device_allowed
+    return {
+        "update_available": allow_update,
+        "update_url": update_url if allow_update else None,
+        "min_supported_version": min_supported_version
+    }
+
+
+@router.get("/token/{mac}")
+async def get_device_token(mac: str):
+    token = await get_shared_token()
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT approved FROM devices WHERE mac = ?", (mac,))
+        row = await cursor.fetchone()
+        if not row or not row[0]:
+            raise HTTPException(status_code=403, detail="Device not approved")
+    return {"token": token}
 
 @router.get("/api/devices")
 async def list_devices(_: str = Depends(require_login)):
@@ -212,14 +273,13 @@ async def list_devices(_: str = Depends(require_login)):
             "hostname": row[0],
             "mac": row[1],
             "ip": row[2],
-            "last_seen": row[3],  # ISO string uit DB; front-end formatLocalTime doet de rest
+            "last_seen": row[3],
             "status": row[4],
             "ssh_enabled": bool(row[5]),
             "device_type": row[6],
             "approved": bool(row[7]),
         } for row in rows
     ])
-
 
 @router.post("/api/approve")
 async def approve_device(mac: str = Form(...), device_type: str = Form(...), _: str = Depends(require_login)):
@@ -260,9 +320,7 @@ async def device_page(device_type: str, mac: str, request: Request, _: str = Dep
         raise HTTPException(status_code=404)
 
     mac_norm = mac.lower()
-
     async with aiosqlite.connect(DB_PATH) as db:
-        # Basis device-info
         cursor = await db.execute(
             "SELECT hostname, ip, ssh_enabled, device_type, agent_update_allowed FROM devices WHERE mac = ?", (mac_norm,)
         )
@@ -279,92 +337,74 @@ async def device_page(device_type: str, mac: str, request: Request, _: str = Dep
             "agent_update_allowed": bool(row[4]),
         }
 
-        # Live status + extra firewallvelden
         cursor = await db.execute(
             """
-            SELECT
-              model,
-              wan_ip,
-              dns_servers,
-              ntp_synced,
-              firewall_state,
-              firewall_profile_active,
-              security_log_samples,
-              updated_at
+            SELECT model, wan_ip, dns_servers, ntp_synced,
+                   firewall_state, firewall_profile_active,
+                   security_log_samples, updated_at
             FROM device_status
             WHERE mac = ?
-            """,
-            (mac_norm,),
+            """, (mac_norm,)
         )
         settings_row = await cursor.fetchone()
 
         settings = None
         if settings_row:
-            # Robust parse for security_log_samples: JSON list OR newline-delimited text OR single string
-            sec_samples = []
-            raw_sec = settings_row[6]
-            if raw_sec:
+            try:
+                sec_samples = []
+                raw_sec = settings_row[6]
                 try:
                     parsed = json.loads(raw_sec)
-                    if isinstance(parsed, list):
-                        sec_samples = [str(x) for x in parsed]
-                    elif isinstance(parsed, str):
-                        s = parsed.strip()
-                        if s:
-                            sec_samples = s.splitlines()
-                except Exception:
-                    # Not JSON – treat as plaintext blob
-                    try:
-                        sec_samples = [ln for ln in str(raw_sec).splitlines() if ln.strip()]
-                    except Exception:
-                        sec_samples = []
+                    sec_samples = parsed if isinstance(parsed, list) else raw_sec.splitlines()
+                except:
+                    sec_samples = raw_sec.splitlines()
 
-            # dns_servers may be JSON or CSV/plaintext; support both
-            dns_field = settings_row[2]
-            dns_list = []
-            if dns_field:
+                dns_list = []
                 try:
-                    dns_list = json.loads(dns_field)
+                    dns_list = json.loads(settings_row[2])
                     if not isinstance(dns_list, list):
-                        dns_list = [str(dns_field)]
-                except Exception:
-                    dns_list = [s.strip() for s in str(dns_field).split(',') if s.strip()]
+                        dns_list = [str(settings_row[2])]
+                except:
+                    dns_list = [s.strip() for s in str(settings_row[2]).split(',') if s.strip()]
 
-            settings = {
-                "model": settings_row[0],
-                "wan_ip": settings_row[1],
-                "dns": dns_list,
-                "ntp_synced": settings_row[3],
-                "firewall_state": settings_row[4],
-                "firewall_profile_active": settings_row[5],
-                "security_log_samples": sec_samples,
-                "updated_at": settings_row[7],
-            }
+                settings = {
+                    "model": settings_row[0],
+                    "wan_ip": settings_row[1],
+                    "dns": dns_list,
+                    "ntp_synced": settings_row[3],
+                    "firewall_state": settings_row[4],
+                    "firewall_profile_active": settings_row[5],
+                    "security_log_samples": sec_samples,
+                    "updated_at": settings_row[7],
+                }
+            except:
+                pass
 
-        # Nieuw: defaults voor de UI uit de laatst gequeue'de config
+        # UI config defaults
         ui_defaults = {
             "firewall_profile_requested": None,
             "sec_enabled": False,
             "sec_level": "info",
             "sec_prefix": "WTSEC",
         }
+
         cursor = await db.execute(
             "SELECT config FROM device_configs WHERE mac = ? ORDER BY created_at DESC LIMIT 1",
-            (mac_norm,),
+            (mac_norm,)
         )
         row = await cursor.fetchone()
         if row and row[0]:
             try:
-                cfg = json.loads(row[0])  # {"package": {...}, "sha256": "..."}
-                pkg = (cfg.get("package") or {})
-                sl = pkg.get("security_logging") or {}
+                cfg = json.loads(row[0])
+                pkg = cfg.get("package", {})
+                sl = pkg.get("security_logging", {})
                 ui_defaults = {
                     "firewall_profile_requested": pkg.get("firewall_profile"),
                     "sec_enabled": bool(sl.get("enabled", False)),
                     "sec_level": sl.get("level", "info"),
                     "sec_prefix": sl.get("prefix", "WTSEC"),
                 }
-            except Exception:
+            except:
                 pass
 
     return templates.TemplateResponse(
@@ -376,7 +416,7 @@ async def device_page(device_type: str, mac: str, request: Request, _: str = Dep
             "ui_defaults": ui_defaults,
         },
     )
-    
+
 @router.post("/api/queue-config")
 async def queue_config(
     mac: str = Form(...),
@@ -384,7 +424,6 @@ async def queue_config(
     sha256: str = Form(...),
     _: str = Depends(require_login)
 ):
-    import hashlib
     try:
         package = json.loads(package_json)
     except Exception:
@@ -414,43 +453,8 @@ async def queue_config(
         await db.commit()
 
     return {"status": "queued", "keys": list(package.keys())}
-
-@router.get("/token/{mac}")
-async def get_device_token(mac: str, request: Request):
-    token = await get_shared_token()
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("SELECT approved FROM devices WHERE mac = ?", (mac,))
-        row = await cursor.fetchone()
-        if not row or not row[0]:
-            raise HTTPException(status_code=403, detail="Device not approved")
-    return {"token": token}
-
-@router.get("/config/agent", dependencies=[Depends(require_api_token)])
-async def get_agent_update_config(request: Request):
-    mac = request.headers.get("X-MAC", "").lower()
-    if not mac:
-        raise HTTPException(status_code=401)
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("SELECT agent_update_allowed FROM devices WHERE mac = ?", (mac,))
-        row = await cursor.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Device not found")
-        per_device_allowed = bool(row[0])
-
-    # deze helpers bestaan al in je codebase
-    from wiretide.api.settings import get_config_value  # import binnen functie om circulars te vermijden
-    updates_enabled = await get_config_value("agent_updates_enabled", "false") == "true"
-    update_url = await get_config_value("agent_update_url", "")
-    min_supported_version = await get_config_value("min_supported_agent_version", "0.1.0")
-
-    allow_update = updates_enabled or per_device_allowed
-    return {
-        "update_available": allow_update,
-        "update_url": update_url if allow_update else None,
-        "min_supported_version": min_supported_version
-    }
-
+    
+    
 @router.post("/devices/{mac}/agent-update", dependencies=[rbac_required("devices:manage")])
 async def toggle_agent_update(mac: str, request: Request):
     form = await request.form()
@@ -464,4 +468,5 @@ async def toggle_agent_update(mac: str, request: Request):
         await db.commit()
 
     return {"status": "ok", "enabled": enabled}
+
 
