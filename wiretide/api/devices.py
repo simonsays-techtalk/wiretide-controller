@@ -1,14 +1,23 @@
-from fastapi import APIRouter, Request, HTTPException, Form, Depends, Body
-from fastapi.responses import JSONResponse, HTMLResponse
-from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
-from datetime import timezone, datetime
-import json, enum, aiosqlite, hashlib
-from wiretide.tokens import get_shared_token
-from wiretide.db import DB_PATH
-from wiretide.api.auth import require_login, rbac_required
-from wiretide.models import DeviceStatus
+from fastapi import APIRouter, Request, HTTPException, Form, Depends, Body 
+from fastapi.responses import JSONResponse, HTMLResponse 
+from fastapi.templating import Jinja2Templates 
+from pydantic import BaseModel 
+from datetime import timezone, datetime 
+import json, enum, aiosqlite, hashlib 
+from wiretide.tokens import get_shared_token 
+from wiretide.db import DB_PATH 
+from wiretide.api.auth import require_login, rbac_required 
+from wiretide.models import DeviceStatus 
+from fastapi import APIRouter, Request, Depends, Body 
+from fastapi.responses import JSONResponse 
+from wiretide.api.auth import require_api_token
+from wiretide.db import DB_PATH 
+from datetime import datetime, timezone 
+import aiosqlite 
+import json 
 import logging
+
+router = APIRouter()
 logger = logging.getLogger("wiretide")
 
 templates = Jinja2Templates(directory="wiretide/templates")
@@ -74,22 +83,21 @@ async def register_device(device: DeviceRegistration, request: Request):
     return {"status": "ok"}
 
 
+
 @router.post("/status", dependencies=[Depends(require_api_token)])
 async def accept_status(request: Request):
-    # Log de ruwe body van de request naar bestand (voor debug)
+    # Ruwe request body loggen
     raw_body = await request.body()
     with open("/tmp/wt-debug-raw.txt", "wb") as f:
         f.write(raw_body)
 
+    # JSON proberen te parsen
     try:
         payload = await request.json()
     except Exception as e:
-        return JSONResponse(
-            {"error": "invalid json", "details": str(e)},
-            status_code=400
-        )
+        return JSONResponse({"error": "invalid json", "details": str(e)}, status_code=400)
 
-    # Log succesvol geparste JSON
+    # JSON loggen voor inspectie
     with open("/tmp/wt-debug-payload.json", "w") as f:
         json.dump(payload, f, indent=2)
 
@@ -117,6 +125,7 @@ async def accept_status(request: Request):
     sec_raw     = pick("security_log_samples", default=[])
     ssh_enabled = bool(payload.get("ssh_enabled"))
 
+    # DNS-parsing
     if isinstance(dns, str):
         try:
             maybe = json.loads(dns)
@@ -128,6 +137,7 @@ async def accept_status(request: Request):
     else:
         dns_list = []
 
+    # Security-logs
     if isinstance(sec_raw, list):
         sec_list = [str(x) for x in sec_raw][-50:]
     elif isinstance(sec_raw, str):
@@ -135,6 +145,7 @@ async def accept_status(request: Request):
     else:
         sec_list = []
 
+    # Clients
     if isinstance(clients_raw, list):
         clients_json = json.dumps(clients_raw[:100])
     else:
@@ -181,8 +192,12 @@ async def accept_status(request: Request):
 
         await db.commit()
 
-    return {"status": "ok", "mac": mac, "clients": len(json.loads(clients_json)), "profile": fw_profile}
-
+    return {
+        "status": "ok",
+        "mac": mac,
+        "clients": len(json.loads(clients_json)),
+        "profile": fw_profile
+    }
 
 @router.get("/config", dependencies=[Depends(require_api_token)])
 async def get_config(request: Request):
