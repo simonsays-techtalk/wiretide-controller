@@ -1,9 +1,9 @@
 #!/bin/sh
 # Wiretide Agent – full production + client reporting
-# Version: 2025.08.14-fwsec11
-# Combines: fwsec10 + clients + full payload logic
+# Version: 2025.08.14-fwsec12a
+# Preserves all fwsec11 functions; adds register + robust token bootstrap
 
-VERSION="Wiretide Agent v2025.08.14-fwsec11"
+VERSION="Wiretide Agent v2025.08.14-fwsec12a"
 LOG_FILE="/tmp/wiretide-debug.log"
 INTERVAL="${INTERVAL:-60}"
 CA_CERT="${CA_CERT:-/etc/wiretide-ca.crt}"
@@ -16,7 +16,7 @@ PAYLOAD_FILE="/tmp/wiretide-last-payload.json"
 SEC_PREFIX_DEFAULT="WTSEC"
 
 CURL_OPTS_COMMON="-s --connect-timeout 5 --max-time 15"
-[ -s "$CA_CERT" ] && CURL_OPTS_COMMON="$CURL_OPTS_COMMON --cacert $CA_CERT"
+[ -s "$CA_CERT" ] && CURL_OPTS_COMMON="$CURL_OPTS_COMMON --cacert $CA_CERT" || CURL_OPTS_COMMON="$CURL_OPTS_COMMON -k"
 
 log() {
   ts="[$(date '+%Y-%m-%d %H:%M:%S')]"
@@ -31,7 +31,7 @@ read_conf_if_exists() {
 }
 
 get_mac() {
-  if [ -n "$MAC" ]; then echo "$(normalize_mac "$MAC")"; return; fi
+  if [ -n "${MAC:-}" ]; then echo "$(normalize_mac "$MAC")"; return; fi
   mac="$(uci -q get network.lan.macaddr 2>/dev/null)"; [ -n "$mac" ] && { echo "$(normalize_mac "$mac")"; return; }
   [ -r /sys/class/net/br-lan/address ] && { cat /sys/class/net/br-lan/address; return; }
   ip link show dev eth0 2>/dev/null | awk '/ether/{print $2; exit}';
@@ -49,13 +49,16 @@ get_wan_ip() {
 }
 
 get_dns_list() {
-  if [ -s /tmp/resolv.conf.d/resolv.conf.auto ]; then
-    awk '/^nameserver/{print $2}' /tmp/resolv.conf.d/resolv.conf.auto
+  file="/tmp/resolv.conf.d/resolv.conf.auto"
+  [ -s "$file" ] || file="/tmp/resolv.conf.auto"
+  [ -s "$file" ] || file="/etc/resolv.conf"
+  if command -v jq >/dev/null 2>&1; then
+    awk '/^nameserver/{print $2}' "$file" 2>/dev/null | jq -R . | jq -cs .
   else
-    awk '/^nameserver/{print $2}' /tmp/resolv.conf
-  fi | jq -R . | jq -cs .
+    # minimal JSON array zonder jq
+    awk '/^nameserver/{print $2}' "$file" 2>/dev/null | paste -sd ',' - | sed 's/^$/[]/; s/\([^,][^,]*\)/"&"/g; s/^/[/' | sed 's/$/]/'
+  fi
 }
-
 
 is_ntp_synced() {
   year=$(date +%Y 2>/dev/null)
@@ -69,30 +72,45 @@ security_log_samples_json() {
   if command -v jq >/dev/null 2>&1; then
     logread -l 400 2>/dev/null | grep "$prefix" | tail -n 20 | jq -R -s 'split("\n") | map(select(length>0))'
   else
+    # fallback: leeg array
     printf '[]'
   fi
 }
 
 list_clients_json() {
+  out="[]"
+  tmp="/tmp/.wt-clients.$$"
+  : > "$tmp"
+  # DHCP leases
   if [ -f /tmp/dhcp.leases ]; then
     awk '{
       ip=$3; mac=$2; name=$4;
-      if (ip && mac) {
-        printf "{\"ip\":\"%s\",\"mac\":\"%s\",\"hostname\":\"%s\"},", ip, mac, name
-      }
-    }' /tmp/dhcp.leases | sed 's/,$//'
+      if (ip && mac) printf "%s %s %s\n", ip, mac, name
+    }' /tmp/dhcp.leases > "$tmp"
   fi
+  # ARP toevoegen als niet in DHCP
+  arp -n 2>/dev/null | awk 'NR>1{print $1" "$3}' | while read -r ip mac; do
+    [ -z "$mac" ] && continue
+    grep -qi " $mac " "$tmp" || echo "$ip $mac -" >> "$tmp"
+  done
+  # Bouw JSON
+  if command -v jq >/dev/null 2>&1; then
+    out="$(awk '{printf("{\"ip\":\"%s\",\"mac\":\"%s\",\"hostname\":\"%s\"}\n",$1,$2,$3)}' "$tmp" | jq -s '.')"
+  else
+    out="["$(awk '{printf("{\"ip\":\"%s\",\"mac\":\"%s\",\"hostname\":\"%s\"},",$1,$2,$3)}' "$tmp" | sed 's/,$//')"]"
+    [ "$out" = "[]" ] || true
+  fi
+  rm -f "$tmp"
+  echo "${out:-[]}"
 }
 
 build_payload() {
   ssh_enabled=false
   pgrep dropbear >/dev/null && [ -s /etc/dropbear/dropbear_rsa_host_key ] && ssh_enabled=true
 
-  dns_json="$(get_dns_list)"
-  [ -n "$dns_json" ] || dns_json="[]"
-
+  dns_json="$(get_dns_list)"; [ -n "$dns_json" ] || dns_json="[]"
   sec_json="$(security_log_samples_json)"; [ -n "$sec_json" ] || sec_json="[]"
-  clients_json="$(list_clients_json)"; [ -n "$clients_json" ] && clients_json="[$clients_json]" || clients_json="[]"
+  clients_json="$(list_clients_json)"; [ -n "$clients_json" ] || clients_json="[]"
 
   model="$(cat /tmp/sysinfo/model 2>/dev/null)"; [ -n "$model" ] || model="unknown"
   ntp_ok="$(is_ntp_synced)"
@@ -120,21 +138,59 @@ build_payload() {
 JSON
 }
 
+# --- NEW: initial registration ---
+register_device() {
+  ssh_fp="unknown"
+  if [ -f /etc/dropbear/dropbear_rsa_host_key ] && command -v dropbearkey >/dev/null 2>&1; then
+    ssh_fp="$(dropbearkey -y -f /etc/dropbear/dropbear_rsa_host_key 2>/dev/null | awk '/Fingerprint/{print $2}')"
+  fi
+  body="$(cat <<JSON
+{"hostname":"$HOSTNAME","mac":"$MAC","ssh_fingerprint":"$ssh_fp","ssh_enabled":true}
+JSON
+)"
+  log "Registering device..."
+  code=$(echo "$body" | curl $CURL_OPTS_COMMON -o /dev/null -w '%{http_code}' \
+         -H "Content-Type: application/json" \
+         -X POST "$CONTROLLER_URL/register" --data @- 2>/dev/null || true)
+  log "Register response: HTTP $code"
+}
+
 fetch_token() {
   log "Fetching token from controller..."
-  newtok="$(curl $CURL_OPTS_COMMON "$CONTROLLER_URL/token/$MAC" | grep -oE '"token"\s*:\s*"[^"]+"' | sed -E 's/.*"token"\s*:\s*"([^"]+)".*/\1/')"
+  resp="$(curl $CURL_OPTS_COMMON -w '\n%{http_code}\n' "$CONTROLLER_URL/token/$MAC" 2>/dev/null || true)"
+  code="$(printf '%s' "$resp" | tail -n1)"
+  body="$(printf '%s' "$resp" | sed '$d')"
+
+  if [ "$code" = "403" ]; then
+    log "Awaiting approval (HTTP 403)."
+    return 2
+  fi
+  if [ "$code" != "200" ]; then
+    log "Token fetch failed: HTTP $code"
+    return 1
+  fi
+
+  newtok="$(echo "$body" | grep -oE '"token"\s*:\s*"[^"]+"' | sed -E 's/.*"token"\s*:\s*"([^"]+)".*/\1/')"
   if [ -n "$newtok" ]; then
-    echo "$newtok" > "$TOKEN_FILE"; chmod 600 "$TOKEN_FILE"
+    umask 077
+    echo "$newtok" > "$TOKEN_FILE"
     TOKEN="$newtok"
     log "New token saved"
+    return 0
   else
-    log "Token fetch failed"
+    log "Token parse failed"
+    return 1
   fi
 }
 
 send_status() {
-  [ ! -f "$TOKEN_FILE" ] && return 1
-  TOKEN="$(cat "$TOKEN_FILE")"
+  if [ ! -f "$TOKEN_FILE" ]; then
+    fetch_token || return $?
+  fi
+
+  TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)"
+  [ -n "$TOKEN" ] || { log "No token available"; return 1; }
+
   log "Sending status update..."
   build_payload
   [ -s "$PAYLOAD_FILE" ] || { log "❌ Payload file does not exist"; return 1; }
@@ -146,16 +202,21 @@ send_status() {
     return 1
   fi
 
-  HTTP_CODE=$(curl $CURL_OPTS_COMMON -o /dev/null -w '%{http_code}'     -H "X-API-Token: $TOKEN"     -H "Content-Type: application/json"     -X POST "$CONTROLLER_URL/status" --data @"$PAYLOAD_FILE")
+  HTTP_CODE=$(curl $CURL_OPTS_COMMON -o /dev/null -w '%{http_code}' \
+    -H "X-API-Token: $TOKEN" \
+    -H "Content-Type: application/json" \
+    -X POST "$CONTROLLER_URL/status" --data @"$PAYLOAD_FILE" || true)
   log "Status update response: HTTP $HTTP_CODE"
 
   if [ "$HTTP_CODE" = "403" ]; then
     log "Token rejected, attempting refresh"
-    fetch_token
+    fetch_token || return 1
     TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)"
     [ -n "$TOKEN" ] || { log "Refresh failed"; return 1; }
-
-    HTTP_CODE=$(curl $CURL_OPTS_COMMON -o /dev/null -w '%{http_code}'       -H "X-API-Token: $TOKEN"       -H "Content-Type: application/json"       -X POST "$CONTROLLER_URL/status" --data @"$PAYLOAD_FILE")
+    HTTP_CODE=$(curl $CURL_OPTS_COMMON -o /dev/null -w '%{http_code}' \
+      -H "X-API-Token: $TOKEN" \
+      -H "Content-Type: application/json" \
+      -X POST "$CONTROLLER_URL/status" --data @"$PAYLOAD_FILE" || true)
     log "Retry status post: HTTP $HTTP_CODE"
     [ "$HTTP_CODE" = "200" ] || return 1
   elif [ "$HTTP_CODE" != "200" ]; then
@@ -167,19 +228,23 @@ send_status() {
 }
 
 handle_config() {
-  [ ! -f "$TOKEN_FILE" ] && return
+  [ ! -f "$TOKEN_FILE" ] && return 0
   TOKEN="$(cat "$TOKEN_FILE")"
   json=$(curl $CURL_OPTS_COMMON -H "X-API-Token: $TOKEN" -H "X-MAC: $MAC" -X GET "$CONTROLLER_URL/config")
   [ -n "$json" ] || { log "No config"; return 0; }
 
-  pkg=$(echo "$json" | jq -c '.package // {}')
+  if command -v jq >/dev/null 2>&1; then
+    pkg=$(echo "$json" | jq -c '.package // {}')
+  else
+    pkg="{}"
+  fi
   [ -n "$pkg" ] || { log "No package"; return 0; }
 
-  prof=$(echo "$pkg" | jq -r '.firewall_profile // empty')
+  prof=$(echo "$pkg" | jq -r '.firewall_profile // empty' 2>/dev/null || echo "")
   [ -n "$prof" ] && echo "$prof" > "$FW_PROFILE_FILE" && sync && log "Applied firewall profile: $prof"
 
-  sec_enabled=$(echo "$pkg" | jq -r '.security_logging.enabled // false')
-  sec_prefix=$(echo "$pkg" | jq -r '.security_logging.prefix // "'"$SEC_PREFIX_DEFAULT"'"')
+  sec_enabled=$(echo "$pkg" | jq -r '.security_logging.enabled // false' 2>/dev/null || echo "false")
+  sec_prefix=$(echo "$pkg" | jq -r '.security_logging.prefix // "'"$SEC_PREFIX_DEFAULT"'"' 2>/dev/null || echo "$SEC_PREFIX_DEFAULT")
   ensure_security_logging_rule "$sec_enabled" "$sec_prefix"
 }
 
@@ -188,7 +253,7 @@ ensure_security_logging_rule() {
   [ -n "$prefix" ] && echo "$prefix" > "$FW_PREFIX_FILE"
 
   uci -q delete firewall.wtsec_log.extra >/dev/null 2>&1 || true
-  for opt in $(uci show firewall | awk -F'=' '/\.extra=/{print $1}'); do uci -q delete "$opt"; done
+  for opt in $(uci show firewall 2>/dev/null | awk -F'=' '/\.extra=/{print $1}'); do uci -q delete "$opt"; done
 
   if [ "$enabled" = "true" ]; then
     uci -q delete firewall.wtsec_log
@@ -205,9 +270,9 @@ ensure_security_logging_rule() {
     logger "${prefix:-$SEC_PREFIX_DEFAULT} TEST: security logging active"
     log "Security logging enabled"
   else
-    uci set firewall.wtsec_log.enabled='0'
-    uci commit firewall
-    /etc/init.d/firewall reload || true
+    uci set firewall.wtsec_log.enabled='0' 2>/dev/null || true
+    uci commit firewall 2>/dev/null || true
+    /etc/init.d/firewall reload 2>/dev/null || true
     log "Security logging disabled"
   fi
 }
@@ -235,8 +300,27 @@ DEVICE_TYPE="${DEVICE_TYPE:-router}"
 log "Starting $VERSION (PID $$)"
 log "Controller=$CONTROLLER_URL, MAC=$MAC, Hostname=$HOSTNAME, Interval=${INTERVAL}s"
 
+# NEW: initial registration (idempotent)
+register_device
+
+# NEW: token bootstrap (backoff tot approval/token)
+if [ ! -f "$TOKEN_FILE" ]; then
+  backoff=15
+  while [ ! -f "$TOKEN_FILE" ]; do
+    if fetch_token; then
+      break
+    else
+      log "No token yet; sleeping ${backoff}s"
+      sleep "$backoff"
+      backoff=$(( backoff * 2 ))
+      [ "$backoff" -gt 300 ] && backoff=300
+    fi
+  done
+fi
+
 while true; do
   send_status || log "Status post failed"
   handle_config || log "Config fetch failed"
   sleep "$INTERVAL"
 done
+
