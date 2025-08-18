@@ -48,14 +48,15 @@ CREATE TABLE IF NOT EXISTS device_status (
     dns_servers TEXT,
     ntp_synced INTEGER,
     firewall_state TEXT,
-    firewall_profile_active TEXT,      -- NIEUW
-    security_log_samples TEXT,         -- NIEUW (JSON string)
+    firewall_profile_active TEXT,      
+    security_log_samples TEXT,         
     updated_at TIMESTAMP
 );
 """)
 
 ensure_column(cursor, "device_status", "firewall_profile_active", "TEXT")
 ensure_column(cursor, "device_status", "security_log_samples", "TEXT")
+ensure_column(cursor, "device_status", "clients", "TEXT")
 
 
 # --- Device configs table ---
