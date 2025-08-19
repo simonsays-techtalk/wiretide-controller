@@ -32,3 +32,11 @@
 </div>
 {% endblock %}
 
+{% block scripts %}
+<script>
+  setInterval(() => {
+    location.reload();
+  }, 30000); // elke 30 seconden vernieuwen
+</script>
+{% endblock %}
+

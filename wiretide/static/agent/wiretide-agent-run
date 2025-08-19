@@ -156,8 +156,12 @@ build_payload() {
 
   model="$(cat /tmp/sysinfo/model 2>/dev/null)"; [ -n "$model" ] || model="unknown"
   ntp_ok="$(is_ntp_synced)"
-  fw_profile_active="$(cat "$FW_PROFILE_FILE" 2>/dev/null | tr -d '\r\n')"
-  [ -n "$fw_profile_active" ] || fw_profile_active="unknown"
+
+  fw_profile_active="unknown"
+  if [ -f "$FW_PROFILE_FILE" ]; then
+    fw_profile_active="$(cat "$FW_PROFILE_FILE" | tr -d '\r\n')"
+    [ -z "$fw_profile_active" ] && fw_profile_active="unknown"
+  fi
 
   cat <<JSON > "$PAYLOAD_FILE"
 {
@@ -179,6 +183,7 @@ build_payload() {
 }
 JSON
 }
+
 
 
 register_device() {
@@ -269,79 +274,34 @@ send_status() {
   return 0
 }
 
-
 apply_firewall_profile() {
   prof="$1"
   [ -n "$prof" ] || return 0
-  echo "$prof" > "$FW_PROFILE_FILE"
-  sync
-  log "Applied firewall profile: $prof"
-}
 
-apply_apps_from_pkg() {
-  # Verwacht $1 = compacte JSON string van het package-object
-  pkg_json="$1"
-  command -v jq >/dev/null 2>&1 || { log "jq not present; skip apps"; return 0; }
+  src="/etc/wiretide/profiles/firewall-${prof}.conf"
 
-  apps=$(printf '%s' "$pkg_json" | jq -r '.apps[]?' 2>/dev/null)
-  [ -z "$apps" ] && { log "No apps specified"; return 0; }
-
-  for app in $apps; do
-    case "$app" in
-      adblock|banip)
-        if opkg list-installed "$app" >/dev/null 2>&1; then
-          log "$app already installed"
-        else
-          log "Installing $app..."
-          opkg update >/dev/null 2>&1 || true
-          out=$(opkg install "$app" 2>&1)
-          log "$app install result:\n$out"
-        fi
-        ;;
-      *)
-        log "Ignoring unsupported app: $app"
-        ;;
-    esac
-  done
-}
-
-handle_config() {
-  [ ! -f "$TOKEN_FILE" ] && return 0
-  TOKEN="$(cat "$TOKEN_FILE")"
-  raw=$(curl $CURL_OPTS_COMMON -H "X-API-Token: $TOKEN" -H "X-MAC: $MAC" -X GET "$CONTROLLER_URL/config")
-  [ -n "$raw" ] || { log "No config"; return 0; }
-
-  command -v jq >/dev/null 2>&1 || { log "jq not present; skipping config apply"; return 0; }
-
-  pkg_json_str=$(printf '%s' "$raw" | jq -r 'try .package_json catch empty')
-  pkg_obj_compact=$(printf '%s' "$raw" | jq -c 'try .package catch {}')
-  sha_srv=$(printf '%s' "$raw" | jq -r 'try .sha256 catch empty')
-
-  if ! verify_pkg_sha "$pkg_json_str" "$sha_srv" "$pkg_obj_compact"; then
+  if [ "$prof" = "custom" ]; then
+    echo "custom" > "$FW_PROFILE_FILE"
+    log "Custom firewall profile detected — skipping apply"
     return 0
   fi
 
-  # Kies bron: geef voorrang aan expliciete string; anders object
-  if [ -n "$pkg_json_str" ]; then
-    pkg_compact="$(printf '%s' "$pkg_json_str" | jq -c '.')"
+  if [ -f "$src" ]; then
+    log "Applying firewall profile '$prof' from: $src"
+
+    cp "$src" /etc/config/firewall
+    sync
+
+    /etc/init.d/firewall stop
+    killall -q -9 ubusd || true
+    sleep 1
+    /etc/init.d/firewall start || /etc/init.d/firewall restart
+
+    echo "$prof" > "$FW_PROFILE_FILE"
+    log "Firewall profile '$prof' applied and reloaded"
   else
-    pkg_compact="$pkg_obj_compact"
+    log "⚠️ Profile '$prof' not found at $src — skipping"
   fi
-
-  # Firewall-profiel
-  prof=$(printf '%s' "$pkg_compact" | jq -r 'try .firewall_profile catch empty')
-  [ -n "$prof" ] && apply_firewall_profile "$prof"
-
-  # Security logging
-  sec_enabled=$(printf '%s' "$pkg_compact" | jq -r 'try .security_logging.enabled catch false')
-  sec_prefix=$(printf '%s' "$pkg_compact" | jq -r 'try .security_logging.prefix catch "'"$SEC_PREFIX_DEFAULT"'"')
-  ensure_security_logging_rule "$sec_enabled" "$sec_prefix"
-
-  # Apps installeren (adblock/banip)
-  apply_apps_from_pkg "$pkg_compact"
-
-  log "Config applied."
-  return 0
 }
 
 
@@ -373,6 +333,79 @@ ensure_security_logging_rule() {
     log "Security logging disabled"
   fi
 }
+
+apply_firewall_profile() {
+  prof="$1"
+  [ -z "$prof" ] && return 0
+
+  echo "$prof" > "$FW_PROFILE_FILE"
+
+  if [ "$prof" = "custom" ]; then
+    log "Custom firewall profile active – skipping controller-managed rules"
+    return 0
+  fi
+
+  conf_path="/etc/wiretide/profiles/firewall-${prof}.conf"
+  if [ -f "$conf_path" ]; then
+    log "Applying firewall profile '$prof' from: $conf_path"
+    . "$conf_path"
+    /etc/init.d/firewall reload || /etc/init.d/firewall restart
+    log "Firewall profile '$prof' applied and reloaded"
+  else
+    log "⚠️ No matching config found: $conf_path"
+  fi
+
+  sync
+}
+
+
+handle_config() {
+  [ ! -f "$TOKEN_FILE" ] && return 0
+  TOKEN="$(cat "$TOKEN_FILE")"
+  raw=$(curl $CURL_OPTS_COMMON -H "X-API-Token: $TOKEN" -H "X-MAC: $MAC" -X GET "$CONTROLLER_URL/config")
+  [ -n "$raw" ] || { log "No config"; return 0; }
+
+  command -v jq >/dev/null 2>&1 || { log "jq not present; skipping config apply"; return 0; }
+
+  pkg_json_str=$(printf '%s' "$raw" | jq -r '.package_json // empty')
+  pkg_obj_compact=$(printf '%s' "$raw" | jq -c '.package // {}')
+  sha_srv=$(printf '%s' "$raw" | jq -r '.sha256 // empty')
+
+  if ! verify_pkg_sha "$pkg_json_str" "$sha_srv" "$pkg_obj_compact"; then
+    return 0
+  fi
+
+  tmpfile="/tmp/.wt-pkg.$$"
+
+  if [ -n "$pkg_json_str" ] && [ "$pkg_json_str" != "null" ]; then
+    printf '%s\n' "$pkg_json_str" > "$tmpfile"
+    jq . "$tmpfile" >&2
+    prof=$(jq -r '.firewall_profile // ""' "$tmpfile")
+    sec_enabled=$(jq -r '.security_logging.enabled // false' "$tmpfile")
+    sec_prefix=$(jq -r '.security_logging.prefix // "'"$SEC_PREFIX_DEFAULT"'"' "$tmpfile")
+    apps_json="$(cat "$tmpfile")"
+  else
+    printf '%s\n' "$pkg_obj_compact" > "$tmpfile"
+    jq . "$tmpfile" >&2
+    prof=$(jq -r '.firewall_profile // ""' "$tmpfile")
+    sec_enabled=$(jq -r '.security_logging.enabled // false' "$tmpfile")
+    sec_prefix=$(jq -r '.security_logging.prefix // "'"$SEC_PREFIX_DEFAULT"'"' "$tmpfile")
+    apps_json="$(cat "$tmpfile")"
+  fi
+
+  rm -f "$tmpfile"
+
+  log "DEBUG: extracted prof=$prof sec_enabled=$sec_enabled sec_prefix=$sec_prefix"
+
+  apply_firewall_profile "$prof"
+  ensure_security_logging_rule "$sec_enabled" "$sec_prefix"
+  apply_apps_from_pkg "$apps_json"
+
+  log "Config applied."
+  log "DEBUG: pkg_compact = $apps_json"
+  return 0
+}
+
 
 # ========== Main ==========
 lockfile="/var/run/wiretide-agent.lock"
