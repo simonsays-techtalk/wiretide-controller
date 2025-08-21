@@ -1,6 +1,6 @@
 #!/bin/sh
 # Wiretide Agent – full production + client reporting
-# Version: 2025.08.14-fwsec12a
+# Version: 2025.08.20-fwsec13
 # Preserves all fwsec11 functions; adds register + robust token bootstrap
 
 VERSION="Wiretide Agent v2025.08.14-fwsec12b"
