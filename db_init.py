@@ -68,6 +68,14 @@ CREATE TABLE IF NOT EXISTS device_configs (
 );
 """)
 
+# --- Client controls table (per-client MAC control) ---
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS client_controls (
+    client_mac TEXT PRIMARY KEY,
+    block_internet INTEGER DEFAULT 0
+);
+""")
+
 # --- Tokens table ---
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS tokens (

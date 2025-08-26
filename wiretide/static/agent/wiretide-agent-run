@@ -1,9 +1,9 @@
 #!/bin/sh
 # Wiretide Agent – full production + client reporting
-# Version: 2025.08.20-fwsec13
+# Version: 2025.08.26-fwsec13
 # Preserves all fwsec11 functions; adds register + robust token bootstrap
 
-VERSION="Wiretide Agent v2025.08.14-fwsec12b"
+VERSION="Wiretide Agent v2025.08.26-fwsec12b"
 LOG_FILE="/tmp/wiretide-debug.log"
 INTERVAL="${INTERVAL:-60}"
 CA_CERT="${CA_CERT:-/etc/wiretide-ca.crt}"
@@ -274,6 +274,73 @@ send_status() {
   return 0
 }
 
+apply_client_blocklist() {
+  local blocklist_file="/tmp/.wt-blocklist"
+  local prefix="wt_block_"
+  local changes=0
+  local mac ip id
+
+  : > "$blocklist_file"
+
+  # Parse JSON blocklist
+  echo "$1" | sed -n 's/.*{\(.*\)}.*/{\1}/p' | while read -r entry; do
+    mac=$(echo "$entry" | grep -o '"mac"\s*:\s*"[^"]*"' | cut -d'"' -f4 | tr 'A-F' 'a-f')
+    enabled=$(echo "$entry" | grep -o '"block_internet"\s*:\s*[^,}]*' | cut -d':' -f2 | tr -d ' ')
+    [ "$enabled" = "true" ] && echo "$mac" >> "$blocklist_file"
+  done
+
+  # Bouw MAC → IP mapping in tijdelijk bestand
+  mac2ip_tmp="/tmp/.wt-mac2ip.$$"
+  : > "$mac2ip_tmp"
+  if [ -f /tmp/dhcp.leases ]; then
+    awk '{print tolower($2)" "$3}' /tmp/dhcp.leases > "$mac2ip_tmp"
+  fi
+
+  # Bestaande firewallregels
+  uci show firewall | grep "$prefix" | cut -d. -f2 | sort -u > /tmp/.wt-block-fw-ids
+
+  # Toevoegen
+  while read -r mac; do
+    ip="$(grep -i "^$mac " "$mac2ip_tmp" | awk '{print $2}')"
+    [ -z "$ip" ] && continue
+    id="${prefix}${mac//:/_}"
+    exists=$(uci show firewall | grep -c "$id" || true)
+    if [ "$exists" -eq 0 ]; then
+      uci add firewall rule
+      uci set firewall.@rule[-1].name="$id"
+      uci set firewall.@rule[-1].src='lan'
+      uci set firewall.@rule[-1].dest='wan'
+      uci set firewall.@rule[-1].proto='all'
+      uci set firewall.@rule[-1].src_ip="$ip"
+      uci set firewall.@rule[-1].target='REJECT'
+      logger -t wiretide "Block internet: added rule for $mac ($ip)"
+      echo "✅ Added block rule: $mac ($ip)" >> /var/wiretide-debug.log
+      changes=1
+    fi
+    sed -i "/$id/d" /tmp/.wt-block-fw-ids
+  done < "$blocklist_file"
+
+  # Verwijderen
+  while read -r id; do
+    [ -z "$id" ] && continue
+    idx=$(uci show firewall | grep "$id" | head -n1 | cut -d. -f2 | cut -d= -f1)
+    [ -n "$idx" ] && uci delete firewall."$idx"
+    logger -t wiretide "Block internet: removed rule $id"
+    echo "❌ Removed old block rule: $id" >> /var/wiretide-debug.log
+    changes=1
+  done < /tmp/.wt-block-fw-ids
+
+  [ "$changes" -eq 1 ] && {
+    uci commit firewall
+    /etc/init.d/firewall reload
+    echo "[OK] Blocklist applied and firewall reloaded" >> /var/wiretide-debug.log
+  }
+
+  rm -f "$mac2ip_tmp" "$blocklist_file" /tmp/.wt-block-fw-ids
+}
+
+
+
 apply_firewall_profile() {
   prof="$1"
   [ -n "$prof" ] || return 0
@@ -358,6 +425,10 @@ apply_firewall_profile() {
   sync
 }
 
+apply_apps_from_pkg() {
+  log "Stub: apply_apps_from_pkg skipped"
+}
+
 
 handle_config() {
   [ ! -f "$TOKEN_FILE" ] && return 0
@@ -376,35 +447,34 @@ handle_config() {
   fi
 
   tmpfile="/tmp/.wt-pkg.$$"
-
   if [ -n "$pkg_json_str" ] && [ "$pkg_json_str" != "null" ]; then
     printf '%s\n' "$pkg_json_str" > "$tmpfile"
-    jq . "$tmpfile" >&2
-    prof=$(jq -r '.firewall_profile // ""' "$tmpfile")
-    sec_enabled=$(jq -r '.security_logging.enabled // false' "$tmpfile")
-    sec_prefix=$(jq -r '.security_logging.prefix // "'"$SEC_PREFIX_DEFAULT"'"' "$tmpfile")
-    apps_json="$(cat "$tmpfile")"
   else
     printf '%s\n' "$pkg_obj_compact" > "$tmpfile"
-    jq . "$tmpfile" >&2
-    prof=$(jq -r '.firewall_profile // ""' "$tmpfile")
-    sec_enabled=$(jq -r '.security_logging.enabled // false' "$tmpfile")
-    sec_prefix=$(jq -r '.security_logging.prefix // "'"$SEC_PREFIX_DEFAULT"'"' "$tmpfile")
-    apps_json="$(cat "$tmpfile")"
   fi
+
+  jq . "$tmpfile" >&2
+
+  prof=$(jq -r '.firewall_profile // ""' "$tmpfile")
+  sec_enabled=$(jq -r '.security_logging.enabled // false' "$tmpfile")
+  sec_prefix=$(jq -r '.security_logging.prefix // "'"$SEC_PREFIX_DEFAULT"'"' "$tmpfile")
+  apps_json="$(cat "$tmpfile")"
+  client_controls=$(jq -c '.client_controls // empty' "$tmpfile")
 
   rm -f "$tmpfile"
 
   log "DEBUG: extracted prof=$prof sec_enabled=$sec_enabled sec_prefix=$sec_prefix"
-
   apply_firewall_profile "$prof"
   ensure_security_logging_rule "$sec_enabled" "$sec_prefix"
   apply_apps_from_pkg "$apps_json"
+
+  [ -n "$client_controls" ] && apply_client_blocklist "$client_controls"
 
   log "Config applied."
   log "DEBUG: pkg_compact = $apps_json"
   return 0
 }
+
 
 
 # ========== Main ==========
