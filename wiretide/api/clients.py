@@ -82,26 +82,38 @@ async def toggle_block(
     router_mac = router_mac.lower()
     client_mac = client_mac.lower()
 
+    # ✅ Correcte parameter-volgorde bij insert
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
-            INSERT INTO client_controls (client_mac, block_internet)
-            VALUES (?, ?)
-            ON CONFLICT(client_mac) DO UPDATE SET block_internet=excluded.block_internet
-        """, (client_mac, int(enabled)))
+            INSERT INTO client_controls (router_mac, client_mac, block_internet)
+            VALUES (?, ?, ?)
+            ON CONFLICT(router_mac, client_mac) DO UPDATE SET block_internet=excluded.block_internet
+        """, (router_mac, client_mac, int(enabled)))
         await db.commit()
 
-    # Package klaarzetten voor agent
-    from wiretide.api.devices import queue_config
-    package = {
-        "client_controls": [
-            { "mac": client_mac, "block_internet": bool(enabled) }
+    # 🔍 Debug output router_mac
+    print("Router_mac in query:", router_mac)
+
+    # 🔄 Haal ALLE geblokkeerde clients op voor deze router
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT client_mac FROM client_controls WHERE block_internet=1 AND router_mac=?",
+            (router_mac,)
+        )
+        all_controls = [
+            {"mac": row[0], "block_internet": True}
+            async for row in cur
         ]
+
+    # 📦 Bouw config package
+    package = {
+        "client_controls": all_controls
     }
     sha = hashlib.sha256(
         json.dumps(package, sort_keys=True, separators=(',', ':')).encode()
     ).hexdigest()
 
-    # Zelfde DB-write als queue_config doet
+    # 💾 Schrijf config blob weg voor deze router
     async with aiosqlite.connect(DB_PATH) as db:
         blob = json.dumps({"package": package, "sha256": sha})
         await db.execute("""

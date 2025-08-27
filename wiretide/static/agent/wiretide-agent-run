@@ -1,9 +1,9 @@
 #!/bin/sh
 # Wiretide Agent – full production + client reporting
-# Version: 2025.08.26-fwsec13
-# Preserves all fwsec11 functions; adds register + robust token bootstrap
+# Version: 2025.08.27-fwsec13
 
-VERSION="Wiretide Agent v2025.08.26-fwsec12b"
+
+VERSION="Wiretide Agent v2025.08.27-fwsec13"
 LOG_FILE="/tmp/wiretide-debug.log"
 INTERVAL="${INTERVAL:-60}"
 CA_CERT="${CA_CERT:-/etc/wiretide-ca.crt}"
@@ -185,7 +185,6 @@ JSON
 }
 
 
-
 register_device() {
   ssh_fp="unknown"
   if [ -f /etc/dropbear/dropbear_rsa_host_key ] && command -v dropbearkey >/dev/null 2>&1; then
@@ -275,38 +274,60 @@ send_status() {
 }
 
 apply_client_blocklist() {
-  local blocklist_file="/tmp/.wt-blocklist"
   local prefix="wt_block_"
   local changes=0
-  local mac ip id
+  local mac ip id sec
 
-  : > "$blocklist_file"
+  echo "[DEBUG] Starting apply_client_blocklist" >> /var/wiretide-debug.log
 
-  # Parse JSON blocklist
-  echo "$1" | sed -n 's/.*{\(.*\)}.*/{\1}/p' | while read -r entry; do
-    mac=$(echo "$entry" | grep -o '"mac"\s*:\s*"[^"]*"' | cut -d'"' -f4 | tr 'A-F' 'a-f')
-    enabled=$(echo "$entry" | grep -o '"block_internet"\s*:\s*[^,}]*' | cut -d':' -f2 | tr -d ' ')
-    [ "$enabled" = "true" ] && echo "$mac" >> "$blocklist_file"
-  done
-
-  # Bouw MAC → IP mapping in tijdelijk bestand
-  mac2ip_tmp="/tmp/.wt-mac2ip.$$"
-  : > "$mac2ip_tmp"
+  # MAC → IP mapping
+  local macip="/tmp/.wt-mac-ip"
+  : > "$macip"
   if [ -f /tmp/dhcp.leases ]; then
-    awk '{print tolower($2)" "$3}' /tmp/dhcp.leases > "$mac2ip_tmp"
+    awk '{print tolower($2)" "$3}' /tmp/dhcp.leases > "$macip"
   fi
 
-  # Bestaande firewallregels
-  uci show firewall | grep "$prefix" | cut -d. -f2 | sort -u > /tmp/.wt-block-fw-ids
+  # Bestaande regels indexeren (name → @rule[N])
+  local map="/tmp/.wt-block-map"
+  : > "$map"
+  uci -q show firewall | awk -F'[.=]' -v P="$prefix" '
+    $0 ~ /^firewall\.[^=]+\.name=/ {
+      sec=$2
+      val=$0; sub(/^[^=]*=/,"",val)
+      gsub(/\047/,"",val)
+      if (index(val, P)==1) print val" "sec
+  }' > "$map"
 
-  # Toevoegen
-  while read -r mac; do
-    ip="$(grep -i "^$mac " "$mac2ip_tmp" | awk '{print $2}')"
-    [ -z "$ip" ] && continue
+  # Verwerk JSON blocklist
+  echo "$1" | grep -o '{[^}]*}' | while read -r entry; do
+    mac=$(echo "$entry" | grep -o '"mac"\s*:\s*"[^"]*"' | cut -d'"' -f4 | tr A-F a-f)
+    enabled=$(echo "$entry" | grep -o '"block_internet"\s*:\s*[^,}]*' | cut -d':' -f2 | tr -d ' ')
+    echo "[DEBUG] Processing mac=$mac enabled=$enabled" >> /var/wiretide-debug.log
+
+    [ "$enabled" != "true" ] && continue
+
+    ip=$(grep -i "^$mac " "$macip" | awk '{print $2}')
+    if [ -z "$ip" ]; then
+      echo "[DEBUG] Skipping $mac: no IP found in DHCP" >> /var/wiretide-debug.log
+      logger -t wiretide "⚠️ No IP found for $mac – skipping"
+      continue
+    fi
+
     id="${prefix}${mac//:/_}"
-    exists=$(uci show firewall | grep -c "$id" || true)
-    if [ "$exists" -eq 0 ]; then
-      uci add firewall rule
+    sec=$(awk -v ID="$id" '$1==ID {print $2}' "$map")
+
+    if [ -n "$sec" ]; then
+      cur_ip=$(uci -q get firewall.$sec.src_ip 2>/dev/null)
+      if [ "$cur_ip" != "$ip" ]; then
+        uci set firewall.$sec.src_ip="$ip"
+        logger -t wiretide "Block internet: updated IP for $mac to $ip"
+        echo "✅ Updated block rule: $mac ($ip)" >> /var/wiretide-debug.log
+        changes=1
+      else
+        echo "[DEBUG] Rule for $mac ($ip) already up to date" >> /var/wiretide-debug.log
+      fi
+    else
+      uci add firewall rule >/dev/null
       uci set firewall.@rule[-1].name="$id"
       uci set firewall.@rule[-1].src='lan'
       uci set firewall.@rule[-1].dest='wan'
@@ -317,28 +338,37 @@ apply_client_blocklist() {
       echo "✅ Added block rule: $mac ($ip)" >> /var/wiretide-debug.log
       changes=1
     fi
-    sed -i "/$id/d" /tmp/.wt-block-fw-ids
-  done < "$blocklist_file"
 
-  # Verwijderen
-  while read -r id; do
-    [ -z "$id" ] && continue
-    idx=$(uci show firewall | grep "$id" | head -n1 | cut -d. -f2 | cut -d= -f1)
-    [ -n "$idx" ] && uci delete firewall."$idx"
-    logger -t wiretide "Block internet: removed rule $id"
-    echo "❌ Removed old block rule: $id" >> /var/wiretide-debug.log
-    changes=1
-  done < /tmp/.wt-block-fw-ids
+    # Markeer regel als “gebruikt” → niet verwijderen
+    sed -i "\|^$id |d" "$map"
+  done
+
+  # Verwijder overgebleven oude regels (alleen als MAC nog actief is in lease)
+  if [ -s "$map" ]; then
+    while read -r line; do
+      id=$(echo "$line" | awk '{print $1}')
+      sec=$(echo "$line" | awk '{print $2}')
+      mac=$(echo "$id" | sed "s/^$prefix//; s/_/:/g")
+      ip=$(grep -i "^$mac " "$macip" | awk '{print $2}')
+      if [ -n "$sec" ] && [ -n "$ip" ]; then
+        uci delete firewall.$sec
+        logger -t wiretide "Block internet: removed stale rule $id"
+        echo "❌ Removed stale rule: $id (MAC $mac with IP $ip)" >> /var/wiretide-debug.log
+        changes=1
+      else
+        echo "[DEBUG] Rule $id skipped from removal (offline or unknown)" >> /var/wiretide-debug.log
+      fi
+    done < "$map"
+  fi
 
   [ "$changes" -eq 1 ] && {
     uci commit firewall
     /etc/init.d/firewall reload
-    echo "[OK] Blocklist applied and firewall reloaded" >> /var/wiretide-debug.log
+    echo "[DEBUG] Firewall updated" >> /var/wiretide-debug.log
   }
 
-  rm -f "$mac2ip_tmp" "$blocklist_file" /tmp/.wt-block-fw-ids
+  echo "[DEBUG] apply_client_blocklist complete" >> /var/wiretide-debug.log
 }
-
 
 
 apply_firewall_profile() {
