@@ -5,52 +5,52 @@
 <h1 class="text-2xl font-semibold mb-4">Connected Clients</h1>
 
 <div class="overflow-x-auto">
-  <table class="min-w-full divide-y divide-gray-600 border border-gray-600 rounded-lg">
-    <thead class="bg-gray-800 text-gray-300 text-sm uppercase">
+  <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg">
+    <thead class="bg-gray-100 dark:bg-gray-800 text-gray-800 dark:text-gray-300 text-sm uppercase">
       <tr>
         <th class="px-4 py-3 text-left">MAC Address</th>
         <th class="px-4 py-3 text-left">IP Address</th>
         <th class="px-4 py-3 text-left">Hostname</th>
         <th class="px-4 py-3 text-left">Reported By</th>
         <th class="px-4 py-3 text-left">Last Seen</th>
-        <th class="px-4 py-3 text-left">Block Internet<span title="Toggle per client internet access (blocks at router level)">🛈</span></th>
+        <th class="px-4 py-3 text-left">Block Internet <span title="Toggle per client internet access (blocks at router level)">🛈</span></th>
       </tr>
     </thead>
-    <tbody class="divide-y divide-gray-700 text-sm text-white">
-  {% for entry in clients %}
-    {% for client in entry.clients %}
-    <tr class="hover:bg-gray-800 transition">
-      <td class="px-4 py-2 font-mono">{{ client.mac }}</td>
-      <td class="px-4 py-2 font-mono">{{ client.ip or "—" }}</td>
-      <td class="px-4 py-2">{{ client.hostname or "—" }}</td>
-      <td class="px-4 py-2">{{ entry.hostname or entry.mac }}</td>
-      <td class="px-4 py-2 text-gray-400">{{ entry.updated_at }}</td>
-      <td class="px-4 py-2">
-        <input type="checkbox"
-               class="wt-block-toggle"
-               data-client-mac="{{ client.mac }}"
-               data-router-mac="{{ entry.mac }}"
-               {% if client.block_inet %}checked{% endif %} />
-      </td>
-    </tr>
-    {% endfor %}
-  {% endfor %}
-</tbody>
-
+    <tbody class="divide-y divide-gray-100 dark:divide-gray-700 text-sm text-gray-900 dark:text-white">
+      {% for entry in clients %}
+        {% for client in entry.clients %}
+        <tr class="hover:bg-gray-50 dark:hover:bg-gray-800 transition">
+          <td class="px-4 py-2 font-mono">{{ client.mac }}</td>
+          <td class="px-4 py-2 font-mono">{{ client.ip or "—" }}</td>
+          <td class="px-4 py-2">{{ client.hostname or "—" }}</td>
+          <td class="px-4 py-2">{{ entry.hostname or entry.mac }}</td>
+          <td class="px-4 py-2 text-gray-500 dark:text-gray-400">{{ entry.updated_at }}</td>
+          <td class="px-4 py-2">
+            <input type="checkbox"
+                   class="wt-block-toggle"
+                   data-client-mac="{{ client.mac | e }}"
+                   data-router-mac="{{ entry.mac | e }}"
+                   {% if client.block_inet %}checked{% endif %} />
+          </td>
+        </tr>
+        {% endfor %}
+      {% endfor %}
+    </tbody>
   </table>
 </div>
 {% endblock %}
-
 {% block scripts %}
+{{ super() }}
 <script>
   setInterval(() => location.reload(), 30000); // elke 30 seconden vernieuwen
 
   document.addEventListener("change", async (e) => {
     if (!e.target.classList.contains("wt-block-toggle")) return;
 
-    const client_mac = e.target.dataset.clientMac;
-    const router_mac = e.target.dataset.routerMac;
-    const enabled = e.target.checked;
+    const checkbox = e.target;
+    const client_mac = checkbox.dataset.clientMac;
+    const router_mac = checkbox.dataset.routerMac;
+    const enabled = checkbox.checked;
 
     const form = new FormData();
     form.append("client_mac", client_mac);
@@ -66,11 +66,11 @@
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
         alert("Error: " + (err.detail || r.statusText));
-        e.target.checked = !enabled;
+        checkbox.checked = !enabled;
       }
     } catch (err) {
       alert("Network error");
-      e.target.checked = !enabled;
+      checkbox.checked = !enabled;
     }
   });
 </script>
