@@ -1,9 +1,9 @@
 fastapi
 uvicorn[standard]
 jinja2
-passlib[bcrypt]
 aiosqlite
 python-dotenv
 itsdangerous
 python-multipart
-
+passlib>=1.7.4,<1.9
+bcrypt>=4.1.2,<5
