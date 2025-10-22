@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 # Set default branch if not explicitly passed
 BRANCH="${WIRETIDE_BRANCH:-beta}"
@@ -28,11 +28,17 @@ echo "[*] Installing Wiretide Controller (dedicated '$SERVICE_USER' user, clean 
 
 apt update && apt install -y nginx python3-venv python3-pip sqlite3 openssl git curl
 
+# Ensure group & user exist
+if ! getent group "$SERVICE_GROUP" >/dev/null 2>&1; then
+    echo "[*] Creating system group: $SERVICE_GROUP"
+    groupadd --system "$SERVICE_GROUP"
+fi
 if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
     echo "[*] Creating system user: $SERVICE_USER"
-    useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
+    useradd --system --no-create-home --shell /usr/sbin/nologin -g "$SERVICE_GROUP" "$SERVICE_USER"
 fi
 
+# Clean previous install dir
 if [ -d "$WIRETIDE_DIR" ]; then
     echo "[*] Removing existing installation at $WIRETIDE_DIR"
     rm -rf "$WIRETIDE_DIR"
@@ -48,15 +54,39 @@ chmod 750 "$CERT_DIR"
 
 cd "$WIRETIDE_DIR"
 
-if [ ! -d venv ]; then
-    $PYTHON_BIN -m venv venv
+# ---- VENV: always clean & recreate to avoid stale bcrypt/passlib
+if [ -d venv ]; then
+    echo "[*] Removing stale venv"
+    rm -rf venv
 fi
+$PYTHON_BIN -m venv venv
 chown -R "$SERVICE_USER:$SERVICE_GROUP" "$WIRETIDE_DIR/venv"
 source venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt
+
+# Upgrade tooling
+python -m pip install --upgrade pip setuptools wheel
+
+# Install requirements with strict resolver & no cache (respects your pins)
+pip install --no-cache-dir --upgrade-strategy eager -r requirements.txt
+
+# Quick sanity self-test to verify bcrypt/passlib backend is healthy
+python - <<'PY'
+import sys
+try:
+    import bcrypt, passlib
+    from passlib.hash import bcrypt as pl_bcrypt
+    v_bcrypt = getattr(bcrypt, "__version__", "unknown")
+    v_passlib = getattr(passlib, "__version__", "unknown")
+    ok = pl_bcrypt.verify("wiretide", pl_bcrypt.hash("wiretide"))
+    print(f"[self-test] bcrypt={v_bcrypt} passlib={v_passlib} ok={ok}")
+except Exception as e:
+    print("[self-test] FAILED:", e)
+    sys.exit(1)
+PY
+
 deactivate
 
+# Provide default logo if missing
 if [ ! -f "$STATIC_DIR/wiretide_logo.png" ]; then
     base64 -d > "$STATIC_DIR/wiretide_logo.png" <<'EOF'
 iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAEklEQVR42mP8z8BQDwADgwHBEdkDTwAAAABJRU5ErkJggg==
@@ -64,11 +94,10 @@ EOF
     chown "$SERVICE_USER:$SERVICE_GROUP" "$STATIC_DIR/wiretide_logo.png"
 fi
 
+# Initialize DB (run as service user using venv python)
 if [ ! -f "$DB_FILE" ]; then
     echo "[*] Creating SQLite database..."
-    source venv/bin/activate
-    sudo -u "$SERVICE_USER" env PATH="$WIRETIDE_DIR/venv/bin:$PATH" python db_init.py
-    deactivate
+    sudo -u "$SERVICE_USER" env PATH="$WIRETIDE_DIR/venv/bin:$PATH" "$WIRETIDE_DIR/venv/bin/python" "$WIRETIDE_DIR/db_init.py"
 fi
 
 chmod 660 "$DB_FILE"
@@ -80,6 +109,7 @@ touch "$LOG_FILE"
 chown "$SERVICE_USER:$SERVICE_GROUP" "$LOG_FILE"
 chmod 660 "$LOG_FILE"
 
+# Prepare API token if not present
 API_TOKEN=$(sqlite3 "$DB_FILE" "SELECT token FROM tokens LIMIT 1;" || true)
 if [ -z "$API_TOKEN" ]; then
     API_TOKEN=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 32)
@@ -136,7 +166,10 @@ if [ ! -f "$AGENT_DIR/install.template.sh" ]; then
 fi
 
 sed "s|__CONTROLLER_URL__|https://$IP|g" "$AGENT_DIR/install.template.sh" > "$AGENT_DIR/install.sh"
-chmod +x "$AGENT_DIR/install.sh" "$AGENT_DIR/wiretide-agent-run" "$AGENT_DIR/wiretide-init"
+chmod +x "$AGENT_DIR/install.sh" 2>/dev/null || true
+# Make optional files executable if present
+[ -f "$AGENT_DIR/wiretide-agent-run" ] && chmod +x "$AGENT_DIR/wiretide-agent-run"
+[ -f "$AGENT_DIR/wiretide-init" ] && chmod +x "$AGENT_DIR/wiretide-init"
 chown -R "$SERVICE_USER:$SERVICE_GROUP" "$AGENT_DIR"
 
 #----------------------------------------
@@ -219,4 +252,3 @@ echo "API Token (for agents): $API_TOKEN"
 echo "CA Download: https://$IP/ca.crt"
 echo "Agent Installer: http://$IP/static/agent/install.sh"
 echo "==========================================="
-
