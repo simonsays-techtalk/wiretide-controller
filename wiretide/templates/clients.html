@@ -4,57 +4,75 @@
 {% block content %}
 <h1 class="text-2xl font-semibold mb-4">Connected Clients</h1>
 
-<div class="flex items-center mb-4">
-  <label class="flex items-center space-x-2">
-    <input id="auto-refresh" type="checkbox" class="h-4 w-4 text-blue-600">
-    <span class="text-sm text-gray-700 dark:text-gray-300">Auto-refresh every 30 seconds</span>
-  </label>
-</div>
-
-<div class="bg-white dark:bg-gray-800 shadow rounded p-4">
-  {% if clients and clients|length > 0 %}
-  <table class="min-w-full text-sm table-auto border">
-    <thead>
-      <tr class="bg-gray-100 dark:bg-gray-700 text-left">
-        <th class="p-2 border">Hostname</th>
-        <th class="p-2 border">IP Address</th>
-        <th class="p-2 border">MAC Address</th>
-        <th class="p-2 border">Type</th>
-        <th class="p-2 border">Connected To</th>
+<div class="overflow-x-auto">
+  <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg">
+    <thead class="bg-gray-100 dark:bg-gray-800 text-gray-800 dark:text-gray-300 text-sm uppercase">
+      <tr>
+        <th class="px-4 py-3 text-left">MAC Address</th>
+        <th class="px-4 py-3 text-left">IP Address</th>
+        <th class="px-4 py-3 text-left">Hostname</th>
+        <th class="px-4 py-3 text-left">Reported By</th>
+        <th class="px-4 py-3 text-left">Last Seen</th>
+        <th class="px-4 py-3 text-left">Block Internet <span title="Toggle per client internet access (blocks at router level)">🛈</span></th>
       </tr>
     </thead>
-    <tbody>
-      {% for client in clients %}
-      <tr>
-        <td class="p-2 border">{{ client.hostname or 'unknown' }}</td>
-        <td class="p-2 border">{{ client.ip or '—' }}</td>
-        <td class="p-2 border">{{ client.mac }}</td>
-        <td class="p-2 border">{{ client.type }}</td>
-        <td class="p-2 border">
-          <a href="/devices/{{ client.device_type }}/{{ client.connected_mac }}"
-             class="text-blue-600 underline">
-            {{ client.connected_to }}
-          </a>
-        </td>
-      </tr>
+    <tbody class="divide-y divide-gray-100 dark:divide-gray-700 text-sm text-gray-900 dark:text-white">
+      {% for entry in clients %}
+        {% for client in entry.clients %}
+        <tr class="hover:bg-gray-50 dark:hover:bg-gray-800 transition">
+          <td class="px-4 py-2 font-mono">{{ client.mac }}</td>
+          <td class="px-4 py-2 font-mono">{{ client.ip or "—" }}</td>
+          <td class="px-4 py-2">{{ client.hostname or "—" }}</td>
+          <td class="px-4 py-2">{{ entry.hostname or entry.mac }}</td>
+          <td class="px-4 py-2 text-gray-500 dark:text-gray-400">{{ entry.updated_at }}</td>
+          <td class="px-4 py-2">
+            <input type="checkbox"
+                   class="wt-block-toggle"
+                   data-client-mac="{{ client.mac | e }}"
+                   data-router-mac="{{ entry.mac | e }}"
+                   {% if client.block_inet %}checked{% endif %} />
+          </td>
+        </tr>
+        {% endfor %}
       {% endfor %}
     </tbody>
   </table>
-  {% else %}
-  <p class="text-gray-600 dark:text-gray-300 text-center">No clients are currently connected.</p>
-  {% endif %}
 </div>
-
+{% endblock %}
+{% block scripts %}
+{{ super() }}
 <script>
-  const checkbox = document.getElementById("auto-refresh");
-  let refreshTimer;
+  setInterval(() => location.reload(), 30000); // elke 30 seconden vernieuwen
 
-  checkbox.addEventListener("change", () => {
-    if (checkbox.checked) {
-      refreshTimer = setInterval(() => window.location.reload(), 30000);
-    } else {
-      clearInterval(refreshTimer);
+  document.addEventListener("change", async (e) => {
+    if (!e.target.classList.contains("wt-block-toggle")) return;
+
+    const checkbox = e.target;
+    const client_mac = checkbox.dataset.clientMac;
+    const router_mac = checkbox.dataset.routerMac;
+    const enabled = checkbox.checked;
+
+    const form = new FormData();
+    form.append("client_mac", client_mac);
+    form.append("router_mac", router_mac);
+    form.append("enabled", enabled);
+
+    try {
+      const r = await fetch("/api/clients/block-toggle", {
+        method: "POST",
+        body: form,
+        credentials: "include"
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        alert("Error: " + (err.detail || r.statusText));
+        checkbox.checked = !enabled;
+      }
+    } catch (err) {
+      alert("Network error");
+      checkbox.checked = !enabled;
     }
   });
 </script>
 {% endblock %}
+

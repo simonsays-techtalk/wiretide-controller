@@ -1,70 +1,367 @@
 {% extends "base.html" %}
-{% block title %}Access Point - {{ device.hostname }}{% endblock %}
+{% block title %}AccessPoint - {{ device.hostname }}{% endblock %}
 
 {% block content %}
-<h1 class="text-2xl font-bold mb-4">Access Point: {{ device.hostname }}</h1>
+{# Fallbacks zodat de template ook werkt als ui_defaults niet in de context zit #}
+{% if ui_defaults is not defined %}
+  {% set ui_defaults = {'firewall_profile_requested': None, 'sec_enabled': False, 'sec_level': 'info', 'sec_prefix': 'WTSEC'} %}
+{% endif %}
 
-<div class="bg-white dark:bg-gray-800 p-4 rounded shadow space-y-2">
-  <p><strong>MAC:</strong> {{ device.mac }}</p>
-  <p><strong>IP:</strong> {{ device.ip }}</p>
-  <p><strong>SSH:</strong> {{ "Enabled" if device.ssh_enabled else "Disabled" }}</p>
+<h1 class="text-2xl font-bold mb-4">AccessPoint: {{ device.hostname }}</h1>
 
-  <h2 class="text-xl font-semibold mt-4">Configuration</h2>
-  <form method="post" action="/clients/access_point/{{ device.mac }}/update" class="space-y-2">
-    <label class="block">
-      <span class="text-sm text-gray-700 dark:text-gray-200">Hostname</span>
-      <input name="hostname" value="{{ device.hostname }}"
-             class="border p-2 rounded w-full dark:bg-gray-700 dark:text-white dark:border-gray-600">
-    </label>
-    <button type="submit" class="bg-blue-600 dark:bg-blue-500 text-white px-4 py-2 rounded">Save</button>
-  </form>
+<!-- Tab navigation -->
+<div class="border-b border-gray-300 dark:border-gray-600 mb-4">
+  <nav class="flex space-x-4" id="tab-nav">
+    <button class="tab-btn px-3 py-2 text-sm font-medium text-gray-700 dark:text-white bg-blue-600 text-white rounded-t" data-tab="live">Live Info</button>
+    <button class="tab-btn px-3 py-2 text-sm font-medium text-gray-700 dark:text-white hover:bg-blue-50 dark:hover:bg-blue-700" data-tab="wifi">Wi-Fi Config</button>
+    <button class="tab-btn px-3 py-2 text-sm font-medium text-gray-700 dark:text-white hover:bg-blue-50 dark:hover:bg-blue-700" data-tab="apps">Apps</button>
+    <button class="tab-btn px-3 py-2 text-sm font-medium text-gray-700 dark:text-white hover:bg-blue-50 dark:hover:bg-blue-700" data-tab="logs">Logs</button>
+    <button class="tab-btn px-3 py-2 text-sm font-medium text-gray-700 dark:text-white hover:bg-blue-50 dark:hover:bg-blue-700" data-tab="advanced">Advanced</button>
+  </nav>
 </div>
 
-{% if settings %}
+<!-- Live Tab -->
+<div id="tab-live" class="tab-content">
+  <div class="bg-white dark:bg-gray-800 p-4 rounded shadow space-y-2">
+    <p><strong>MAC:</strong> {{ device.mac }}</p>
+    <p><strong>IP:</strong> {{ device.ip }}</p>
+    <p><strong>SSH:</strong> {{ "Enabled" if device.ssh_enabled else "Disabled" }}</p>
+  </div>
+  <form method="POST" action="/devices/{{ device.mac }}/agent-update" class="mt-4 bg-white dark:bg-gray-800 p-4 rounded shadow">
+    <label class="inline-flex items-center">
+      <input type="checkbox" name="enabled" value="true"
+             {% if device.agent_update_allowed %}checked{% endif %}
+             class="form-checkbox h-4 w-4 text-blue-600">
+      <span class="ml-2 text-sm text-gray-800 dark:text-gray-200">Allow automatic agent updates</span>
+    </label>
+    <div class="mt-2">
+      <button type="submit"
+              class="px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700">Save settings</button>
+    </div>
+  </form>
+
+
+  {% if settings %}
   <div class="bg-white dark:bg-gray-800 p-4 mt-6 rounded shadow">
     <h2 class="text-xl font-semibold mb-2">Live Device Status</h2>
     <table class="table-auto border w-full text-sm text-gray-900 dark:text-gray-100">
       <tbody>
-        <tr>
-          <td class="p-2 border font-medium">Model</td>
-          <td class="p-2 border">{{ settings.model or '—' }}</td>
-        </tr>
-        <tr>
-          <td class="p-2 border font-medium">LAN IP</td>
-          <td class="p-2 border">{{ device.ip }}</td>
-        </tr>
-        <tr>
-          <td class="p-2 border font-medium">WiFi 2 SSID</td>
-          <td class="p-2 border">{{ settings.wifi2 or '—' }}</td>
-        </tr>
-        <tr>
-          <td class="p-2 border font-medium">WiFi 5 SSID</td>
-          <td class="p-2 border">{{ settings.wifi5 or '—' }}</td>
-        </tr>
-        <tr>
-          <td class="p-2 border font-medium">DNS Servers</td>
-          <td class="p-2 border">
-            {% if settings.dns %}
-              {{ settings.dns | join(", ") }}
-            {% else %}
-              —
-            {% endif %}
-          </td>
-        </tr>
-        <tr>
-          <td class="p-2 border font-medium">Firewall</td>
-          <td class="p-2 border">{{ settings.firewall_state.capitalize() if settings.firewall_state else '—' }}</td>
-        </tr>
-        <tr>
-          <td class="p-2 border font-medium">NTP</td>
-          <td class="p-2 border">{{ 'Enabled' if settings.ntp_synced else 'Disabled' }}</td>
-        </tr>
-        <tr>
-          <td class="p-2 border font-medium">Last Updated</td>
-          <td class="p-2 border">{{ settings.updated_at }}</td>
-        </tr>
+        <tr><td class="p-2 border font-medium">Model</td><td class="p-2 border">{{ settings.model or '—' }}</td></tr>
+        <tr><td class="p-2 border font-medium">LAN IP</td><td class="p-2 border">{{ device.ip }}</td></tr>
+        <tr><td class="p-2 border font-medium">NTP</td><td class="p-2 border">{{ 'Enabled' if settings.ntp_synced else 'Disabled' }}</td></tr>
+        <tr><td class="p-2 border font-medium">Last Updated</td><td class="p-2 border">{{ settings.updated_at }}</td></tr>
       </tbody>
     </table>
   </div>
-{% endif %}
+  {% endif %}
+</div>
+
+<!-- Apps Tab -->
+<div id="tab-apps" class="tab-content hidden">
+  <div class="bg-white dark:bg-gray-800 p-4 rounded shadow space-y-2">
+    <label><input type="checkbox" id="install-adblock" class="mr-2">Install Adblock</label><br>
+    <label><input type="checkbox" id="install-banip" class="mr-2">Install banIP</label><br>
+    <button onclick="queueAppTasks()" class="mt-2 px-4 py-2 bg-blue-600 text-white rounded">Send to Device</button>
+  </div>
+</div>
+
+
+<!-- Other tabs (placeholders to keep layout consistent) -->
+<div id="tab-logs" class="tab-content hidden"><div class="p-4 bg-white dark:bg-gray-800 rounded shadow">Coming soon</div></div>
+<div id="tab-advanced" class="tab-content hidden"><div class="p-4 bg-white dark:bg-gray-800 rounded shadow">Coming soon</div></div>
+
+<!-- Wi-Fi Config Tab -->
+<div id="tab-wifi" class="tab-content hidden">
+  <div class="p-4 bg-white dark:bg-gray-800 rounded shadow space-y-6">
+    <h2 class="text-xl font-semibold mb-2 text-gray-800 dark:text-white">Wi‑Fi Configuration</h2>
+
+    <form id="wifi-form">
+      {% for band in ['radio0', 'radio1'] %}
+      <fieldset class="border border-gray-300 dark:border-gray-600 p-4 rounded space-y-4">
+        <legend class="text-lg font-medium text-gray-800 dark:text-white">Settings for {{ band }}</legend>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <input type="hidden" name="{{ band }}_band" value="{{ band }}">
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 dark:text-gray-200">SSID</label>
+            <input name="{{ band }}_ssid" type="text"
+                   class="w-full mt-1 px-3 py-2 bg-white dark:bg-gray-700 text-gray-900 dark:text-white border border-gray-300 dark:border-gray-600 rounded shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="e.g. MyNetwork" required>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 dark:text-gray-200">Password</label>
+            <input name="{{ band }}_password" type="text"
+                   class="w-full mt-1 px-3 py-2 bg-white dark:bg-gray-700 text-gray-900 dark:text-white border border-gray-300 dark:border-gray-600 rounded shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="Minimum 8 characters" required>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 dark:text-gray-200">Channel</label>
+            <input name="{{ band }}_channel" type="number"
+                   class="w-full mt-1 px-3 py-2 bg-white dark:bg-gray-700 text-gray-900 dark:text-white border border-gray-300 dark:border-gray-600 rounded shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   required>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 dark:text-gray-200">Bandwidth</label>
+            <select name="{{ band }}_htmode"
+                    class="w-full mt-1 px-3 py-2 bg-white dark:bg-gray-700 text-gray-900 dark:text-white border border-gray-300 dark:border-gray-600 rounded shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    required>
+              <option value="HE20">HE20 (20 MHz)</option>
+              <option value="HE40">HE40 (40 MHz)</option>
+              <option value="HE80">HE80 (80 MHz)</option>
+            </select>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 dark:text-gray-200">TX Power (dBm)</label>
+            <input name="{{ band }}_txpower" type="number"
+                   class="w-full mt-1 px-3 py-2 bg-white dark:bg-gray-700 text-gray-900 dark:text-white border border-gray-300 dark:border-gray-600 rounded shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   required>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 dark:text-gray-200">Country code</label>
+            <select name="{{ band }}_country"
+                    class="w-full mt-1 px-3 py-2 bg-white dark:bg-gray-700 text-gray-900 dark:text-white border border-gray-300 dark:border-gray-600 rounded shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    required>
+              {% for code in ['NL', 'DE', 'FR', 'BE', 'US', 'GB'] %}
+              <option value="{{ code }}">{{ code }}</option>
+              {% endfor %}
+            </select>
+          </div>
+
+          <div class="md:col-span-2">
+            <label class="inline-flex items-center text-gray-700 dark:text-gray-200">
+              <input type="checkbox" name="{{ band }}_roaming"
+                     class="form-checkbox h-4 w-4 text-blue-600 dark:bg-gray-700 dark:border-gray-600 mr-2">
+              Enable roaming (802.11r/k/v)
+            </label>
+            <input type="text"
+                   name="{{ band }}_mobility_domain"
+                   class="mt-1 ml-6 px-3 py-2 w-48 bg-gray-100 dark:bg-gray-800 text-gray-500 border border-gray-300 dark:border-gray-600 rounded"
+                   placeholder="mobility domain (e.g. f09f)"
+                   maxlength="4">
+          </div>
+        </div>
+      </fieldset>
+      {% endfor %}
+
+      <fieldset class="border border-gray-300 dark:border-gray-600 p-4 rounded space-y-3">
+        <legend class="text-lg font-medium text-gray-800 dark:text-white">LAN Configuration (optional)</legend>
+        <label class="inline-flex items-center text-gray-700 dark:text-gray-200">
+          <input type="checkbox" id="use-static-ip"
+                 class="form-checkbox h-4 w-4 text-blue-600 dark:bg-gray-700 dark:border-gray-600 mr-2">
+          Use static IP
+        </label>
+
+        <div id="static-ip-fields" class="grid grid-cols-1 md:grid-cols-2 gap-4 hidden mt-2">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 dark:text-gray-200">IP Address</label>
+            <input name="ipaddr"
+                   class="w-full mt-1 px-3 py-2 bg-white dark:bg-gray-700 text-gray-900 dark:text-white border border-gray-300 dark:border-gray-600 rounded shadow-sm">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 dark:text-gray-200">Netmask</label>
+            <input name="netmask" value="255.255.255.0"
+                   class="w-full mt-1 px-3 py-2 bg-white dark:bg-gray-700 text-gray-900 dark:text-white border border-gray-300 dark:border-gray-600 rounded shadow-sm">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 dark:text-gray-200">Gateway</label>
+            <input name="gateway" value="192.168.188.1"
+                   class="w-full mt-1 px-3 py-2 bg-white dark:bg-gray-700 text-gray-900 dark:text-white border border-gray-300 dark:border-gray-600 rounded shadow-sm">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 dark:text-gray-200">DNS server (optional)</label>
+            <input name="dns"
+                   class="w-full mt-1 px-3 py-2 bg-white dark:bg-gray-700 text-gray-900 dark:text-white border border-gray-300 dark:border-gray-600 rounded shadow-sm">
+          </div>
+        </div>
+      </fieldset>
+
+      <div class="mt-4">
+        <button type="button" onclick="queueWifiConfig()"
+                class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">Send to Device</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+
+<script>
+document.getElementById("use-static-ip").addEventListener("change", function () {
+  document.getElementById("static-ip-fields").classList.toggle("hidden", !this.checked);
+});
+
+async function queueWifiConfig() {
+  const mac = "{{ device.mac }}";
+  const form = document.getElementById("wifi-form");
+  const data = new FormData(form);
+
+  const wifi = {};
+  for (const band of ["radio0", "radio1"]) {
+    const ssid = data.get(`${band}_ssid`)?.trim();
+    const password = data.get(`${band}_password`)?.trim();
+    const channel = parseInt(data.get(`${band}_channel`));
+    const htmode = data.get(`${band}_htmode`);
+    const txpower = parseInt(data.get(`${band}_txpower`));
+    const country = data.get(`${band}_country`);
+    const roaming = data.get(`${band}_roaming`) === "on";
+    const mobility_domain = data.get(`${band}_mobility_domain`)?.trim();
+
+    if (!ssid || !password || isNaN(channel) || !htmode || isNaN(txpower) || !country) {
+      alert(`Alle velden voor ${band} zijn verplicht`);
+      return;
+    }
+
+    wifi[band] = { ssid, password, channel, htmode, txpower, country, roaming };
+
+    if (roaming) {
+      if (!/^[0-9a-fA-F]{4}$/.test(mobility_domain)) {
+        alert(`Mobility domain voor ${band} moet 4 hex tekens zijn`);
+        return;
+      }
+      wifi[band].mobility_domain = mobility_domain.toLowerCase();
+    }
+  }
+
+  const network = {};
+  if (document.getElementById("use-static-ip").checked) {
+    const ipaddr = data.get("ipaddr")?.trim();
+    const netmask = data.get("netmask")?.trim();
+    const gateway = data.get("gateway")?.trim();
+    const dns = data.get("dns")?.trim();
+
+    if (!ipaddr || !netmask || !gateway) {
+      alert("IP, Netmask en Gateway zijn verplicht bij statisch IP");
+      return;
+    }
+
+    network.static_ip = true;
+    network.ipaddr = ipaddr;
+    network.netmask = netmask;
+    network.gateway = gateway;
+    if (dns) network.dns = dns;
+  }
+
+  const pkg = { wifi, ...(network.static_ip ? { network } : {}) };
+  const pkgStr = JSON.stringify(pkg, Object.keys(pkg).sort());
+  const msgUint8 = new TextEncoder().encode(pkgStr);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', msgUint8);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  const sha256 = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+
+  const formData = new FormData();
+  formData.append("mac", mac);
+  formData.append("package_json", pkgStr);
+  formData.append("sha256", sha256);
+
+  try {
+    const res = await fetch("/api/queue-config", { method: "POST", body: formData });
+    if (res.ok) {
+      alert("Wi-Fi config verzonden.");
+    } else {
+      const body = await res.json();
+      alert("Fout: " + (body.detail || `HTTP ${res.status}`));
+    }
+  } catch (err) {
+    alert("Netwerkfout: " + err);
+  }
+}
+</script>
+
+<script>
+  // Tab switching
+  document.querySelectorAll(".tab-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const target = btn.dataset.tab;
+      document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("bg-blue-600","text-white","rounded-t"));
+      btn.classList.add("bg-blue-600","text-white","rounded-t");
+      document.querySelectorAll(".tab-content").forEach(tab => tab.classList.add("hidden"));
+      document.getElementById(`tab-${target}`).classList.remove("hidden");
+    });
+  });
+
+  async function sha256(message) {
+    const msgUint8 = new TextEncoder().encode(message);
+    const hashBuffer = await crypto.subtle.digest('SHA-256', msgUint8);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  function stableStringify(obj) {
+    if (obj === null || typeof obj !== 'object') return JSON.stringify(obj);
+    if (Array.isArray(obj)) return '[' + obj.map(stableStringify).join(',') + ']';
+    return '{' + Object.keys(obj).sort().map(k => JSON.stringify(k)+":"+stableStringify(obj[k])).join(',') + '}';
+  }
+
+  document.getElementById('send-fw').addEventListener('click', async () => {
+    const mac = '{{ device.mac }}';
+    const profile = document.getElementById('firewall-profile').value;
+    const secEnabled = document.getElementById('sec-enabled').checked;
+    const secLevel = document.getElementById('sec-level').value || 'info';
+    const secPrefix = document.getElementById('sec-prefix').value || 'WTSEC';
+
+    const pkg = {};
+    if (profile) pkg.firewall_profile = profile;
+    pkg.security_logging = { enabled: !!secEnabled, level: secLevel, prefix: secPrefix };
+
+    const pkgStr = stableStringify(pkg);
+    const sha = await sha256(pkgStr);
+
+    const formData = new FormData();
+    formData.append('mac', mac);
+    formData.append('package_json', pkgStr);
+    formData.append('sha256', sha);
+
+    try {
+      const res = await fetch('/api/queue-config', { method: 'POST', body: formData });
+      if (res.ok) {
+        alert('Queued config for device.');
+      } else {
+        alert(`Failed to queue config: HTTP ${res.status}`);
+      }
+    } catch (err) {
+      console.error('Queue error:', err);
+      alert('Network error while queuing config');
+    }
+  });
+  
+  async function queueAppTasks() {
+  const mac = "{{ device.mac }}";
+  const adblock = document.getElementById("install-adblock").checked;
+  const banIP = document.getElementById("install-banip").checked;
+  const apps = [];
+  if (adblock) apps.push("adblock");
+  if (banIP) apps.push("banip");
+  if (apps.length === 0) return;
+
+  const pkg = { apps };
+  const pkgStr = stableStringify(pkg);
+  const sha = await sha256(pkgStr);
+
+  const formData = new FormData();
+  formData.append("mac", mac);
+  formData.append("package_json", pkgStr);
+  formData.append("sha256", sha);
+
+  try {
+    const res = await fetch("/api/queue-config", { method: "POST", body: formData });
+    if (res.ok) {
+      alert("App install package sent to device.");
+    } else {
+      const body = await res.json();
+      let msg = "Unknown error";
+      if (typeof body.detail === "string") msg = body.detail;
+      else if (Array.isArray(body.detail)) msg = body.detail.map(e => e.msg || JSON.stringify(e)).join(", ");
+      else if (typeof body.detail === "object") msg = JSON.stringify(body.detail);
+      alert("Failed: " + msg);
+    }
+  } catch (err) {
+    alert("Network error: " + err);
+  }
+}
+
+</script>
 {% endblock %}

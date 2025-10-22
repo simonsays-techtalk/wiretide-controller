@@ -2,7 +2,11 @@ import sqlite3
 import os
 from passlib.hash import bcrypt
 
-DB_PATH = "/opt/wiretide/wiretide.db"
+branch = os.getenv("WIRETIDE_BRANCH", "main")
+if branch == "beta":
+    DB_PATH = "/opt/wiretide-beta/wiretide.db"
+else:
+    DB_PATH = "/opt/wiretide/wiretide.db"
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 conn = sqlite3.connect(DB_PATH)
@@ -44,14 +48,15 @@ CREATE TABLE IF NOT EXISTS device_status (
     dns_servers TEXT,
     ntp_synced INTEGER,
     firewall_state TEXT,
-    firewall_profile_active TEXT,      -- NIEUW
-    security_log_samples TEXT,         -- NIEUW (JSON string)
+    firewall_profile_active TEXT,      
+    security_log_samples TEXT,         
     updated_at TIMESTAMP
 );
 """)
 
 ensure_column(cursor, "device_status", "firewall_profile_active", "TEXT")
 ensure_column(cursor, "device_status", "security_log_samples", "TEXT")
+ensure_column(cursor, "device_status", "clients", "TEXT")
 
 
 # --- Device configs table ---
@@ -62,6 +67,17 @@ CREATE TABLE IF NOT EXISTS device_configs (
     created_at TIMESTAMP
 );
 """)
+
+# --- Client controls table (per-router, per-client MAC control) ---
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS client_controls (
+    router_mac TEXT NOT NULL,
+    client_mac TEXT NOT NULL,
+    block_internet INTEGER DEFAULT 0,
+    PRIMARY KEY (router_mac, client_mac)
+);
+""")
+
 
 # --- Tokens table ---
 cursor.execute("""

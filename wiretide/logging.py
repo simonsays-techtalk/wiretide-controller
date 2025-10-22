@@ -3,7 +3,7 @@ import os
 import logging
 from logging.handlers import RotatingFileHandler
 
-LOG_FILE = "/var/log/wiretide.log"
+LOG_FILE = "/opt/wiretide/logs/wiretide.log"
 
 # Ensure log directory exists
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)

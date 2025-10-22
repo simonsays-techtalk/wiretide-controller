@@ -1,9 +1,9 @@
 #!/bin/sh
-# Wiretide Agent – resilient loop + firewall logging + timeouts
-# Version: 2025.08.11-fwsec10
-# Target: OpenWrt BusyBox / ash
+# Wiretide Agent – full production + client reporting
+# Version: 2025.08.27-fwsec13
 
-VERSION="Wiretide Agent v2025.08.11+fwsec10"
+
+VERSION="Wiretide Agent v2025.08.27-fwsec13"
 LOG_FILE="/tmp/wiretide-debug.log"
 INTERVAL="${INTERVAL:-60}"
 CA_CERT="${CA_CERT:-/etc/wiretide-ca.crt}"
@@ -16,7 +16,7 @@ PAYLOAD_FILE="/tmp/wiretide-last-payload.json"
 SEC_PREFIX_DEFAULT="WTSEC"
 
 CURL_OPTS_COMMON="-s --connect-timeout 5 --max-time 15"
-[ -s "$CA_CERT" ] && CURL_OPTS_COMMON="$CURL_OPTS_COMMON --cacert $CA_CERT"
+[ -s "$CA_CERT" ] && CURL_OPTS_COMMON="$CURL_OPTS_COMMON --cacert $CA_CERT" || CURL_OPTS_COMMON="$CURL_OPTS_COMMON -k"
 
 log() {
   ts="[$(date '+%Y-%m-%d %H:%M:%S')]"
@@ -31,11 +31,53 @@ read_conf_if_exists() {
 }
 
 get_mac() {
-  if [ -n "$MAC" ]; then echo "$(normalize_mac "$MAC")"; return; fi
+  if [ -n "${MAC:-}" ]; then echo "$(normalize_mac "$MAC")"; return; fi
   mac="$(uci -q get network.lan.macaddr 2>/dev/null)"; [ -n "$mac" ] && { echo "$(normalize_mac "$mac")"; return; }
   [ -r /sys/class/net/br-lan/address ] && { cat /sys/class/net/br-lan/address; return; }
   ip link show dev eth0 2>/dev/null | awk '/ether/{print $2; exit}';
 }
+
+sha256_str() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$1" | sha256sum | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    printf '%s' "$1" | openssl dgst -sha256 | awk '{print $2}'
+  else
+    echo ""
+  fi
+}
+
+verify_pkg_sha() {
+  pkg_json_str="$1"   # lege string toegestaan
+  sha_srv="$2"
+  pkg_obj_compact="$3"  # compacte objectstring of leeg
+
+  [ -z "$sha_srv" ] && { log "⚠️ No sha256 in config; skipping verification"; return 0; }
+
+  # 1) raw string hash
+  if [ -n "$pkg_json_str" ]; then
+    h_raw="$(sha256_str "$pkg_json_str")"
+    [ "$h_raw" = "$sha_srv" ] && { log "✅ Package SHA256 OK (raw string)"; return 0; }
+  fi
+
+  # 2) canonicalized string hash
+  if [ -n "$pkg_json_str" ] && command -v jq >/dev/null 2>&1; then
+    canon_str="$(printf '%s' "$pkg_json_str" | jq -cS '.' 2>/dev/null || printf '%s' "$pkg_json_str")"
+    h_canon_str="$(sha256_str "$canon_str")"
+    [ "$h_canon_str" = "$sha_srv" ] && { log "✅ Package SHA256 OK (canon string)"; return 0; }
+  fi
+
+  # 3) canonicalized object hash
+  if [ -n "$pkg_obj_compact" ] && command -v jq >/dev/null 2>&1; then
+    canon_obj="$(printf '%s' "$pkg_obj_compact" | jq -cS '.' 2>/dev/null || printf '%s' "$pkg_obj_compact")"
+    h_canon_obj="$(sha256_str "$canon_obj")"
+    [ "$h_canon_obj" = "$sha_srv" ] && { log "✅ Package SHA256 OK (object)"; return 0; }
+  fi
+
+  log "❌ Package SHA mismatch; skipping (srv=$sha_srv)"
+  return 1
+}
+
 
 get_hostname() {
   uci -q get system.@system[0].hostname 2>/dev/null || uname -n
@@ -49,10 +91,14 @@ get_wan_ip() {
 }
 
 get_dns_list() {
-  if [ -s /tmp/resolv.conf.d/resolv.conf.auto ]; then
-    awk '/^nameserver/{print $2}' /tmp/resolv.conf.d/resolv.conf.auto | tr '\n' ',' | sed 's/,$//'
+  file="/tmp/resolv.conf.d/resolv.conf.auto"
+  [ -s "$file" ] || file="/tmp/resolv.conf.auto"
+  [ -s "$file" ] || file="/etc/resolv.conf"
+  if command -v jq >/dev/null 2>&1; then
+    awk '/^nameserver/{print $2}' "$file" 2>/dev/null | jq -R . | jq -cs .
   else
-    awk '/^nameserver/{print $2}' /tmp/resolv.conf | tr '\n' ',' | sed 's/,$//'
+    # minimal JSON array zonder jq
+    awk '/^nameserver/{print $2}' "$file" 2>/dev/null | paste -sd ',' - | sed 's/^$/[]/; s/\([^,][^,]*\)/"&"/g; s/^/[/' | sed 's/$/]/'
   fi
 }
 
@@ -61,31 +107,61 @@ is_ntp_synced() {
   if [ "$year" -ge 2020 ]; then echo true; else echo false; fi
 }
 
-json_escape() { sed 's/\\/\\\\/g; s/"/\\"/g'; }
+json_escape() { sed 's/\\/\\\\/g; s/"/\\\"/g'; }
 
 security_log_samples_json() {
   prefix="$(cat "$FW_PREFIX_FILE" 2>/dev/null)"; [ -n "$prefix" ] || prefix="$SEC_PREFIX_DEFAULT"
   if command -v jq >/dev/null 2>&1; then
     logread -l 400 2>/dev/null | grep "$prefix" | tail -n 20 | jq -R -s 'split("\n") | map(select(length>0))'
   else
+    # fallback: leeg array
     printf '[]'
   fi
+}
+
+list_clients_json() {
+  out="[]"
+  tmp="/tmp/.wt-clients.$$"
+  : > "$tmp"
+  # DHCP leases
+  if [ -f /tmp/dhcp.leases ]; then
+    awk '{
+      ip=$3; mac=$2; name=$4;
+      if (ip && mac) printf "%s %s %s\n", ip, mac, name
+    }' /tmp/dhcp.leases > "$tmp"
+  fi
+  # ARP toevoegen als niet in DHCP
+  arp -n 2>/dev/null | awk 'NR>1{print $1" "$3}' | while read -r ip mac; do
+    [ -z "$mac" ] && continue
+    grep -qi " $mac " "$tmp" || echo "$ip $mac -" >> "$tmp"
+  done
+  # Bouw JSON
+  if command -v jq >/dev/null 2>&1; then
+    out="$(awk '{printf("{\"ip\":\"%s\",\"mac\":\"%s\",\"hostname\":\"%s\"}\n",$1,$2,$3)}' "$tmp" | jq -s '.')"
+  else
+    out="["$(awk '{printf("{\"ip\":\"%s\",\"mac\":\"%s\",\"hostname\":\"%s\"},",$1,$2,$3)}' "$tmp" | sed 's/,$//')"]"
+    [ "$out" = "[]" ] || true
+  fi
+  rm -f "$tmp"
+  echo "${out:-[]}"
 }
 
 build_payload() {
   ssh_enabled=false
   pgrep dropbear >/dev/null && [ -s /etc/dropbear/dropbear_rsa_host_key ] && ssh_enabled=true
 
-  dns_csv="$(get_dns_list)"
-  dns_json="[]"
-  [ -n "$dns_csv" ] && dns_json="[\"$(echo "$dns_csv" | sed 's/,/\",\"/g')\"]"
-
+  dns_json="$(get_dns_list)"; [ -n "$dns_json" ] || dns_json="[]"
   sec_json="$(security_log_samples_json)"; [ -n "$sec_json" ] || sec_json="[]"
+  clients_json="$(list_clients_json)"; [ -n "$clients_json" ] || clients_json="[]"
 
   model="$(cat /tmp/sysinfo/model 2>/dev/null)"; [ -n "$model" ] || model="unknown"
   ntp_ok="$(is_ntp_synced)"
-  fw_profile_active="$(cat "$FW_PROFILE_FILE" 2>/dev/null | tr -d '\r\n')"
-  [ -n "$fw_profile_active" ] || fw_profile_active="unknown"
+
+  fw_profile_active="unknown"
+  if [ -f "$FW_PROFILE_FILE" ]; then
+    fw_profile_active="$(cat "$FW_PROFILE_FILE" | tr -d '\r\n')"
+    [ -z "$fw_profile_active" ] && fw_profile_active="unknown"
+  fi
 
   cat <<JSON > "$PAYLOAD_FILE"
 {
@@ -100,27 +176,67 @@ build_payload() {
     "ntp": $ntp_ok,
     "firewall": true,
     "firewall_profile": "$(echo "$fw_profile_active" | json_escape)",
-    "security_log_samples": $sec_json
-  }
+    "security_log_samples": $sec_json,
+    "agent_version": "$VERSION"
+  },
+  "clients": $clients_json
 }
 JSON
 }
 
+
+register_device() {
+  ssh_fp="unknown"
+  if [ -f /etc/dropbear/dropbear_rsa_host_key ] && command -v dropbearkey >/dev/null 2>&1; then
+    ssh_fp="$(dropbearkey -y -f /etc/dropbear/dropbear_rsa_host_key 2>/dev/null | awk '/Fingerprint/{print $2}')"
+  fi
+  body="$(cat <<JSON
+{"hostname":"$HOSTNAME","mac":"$MAC","ssh_fingerprint":"$ssh_fp","ssh_enabled":true}
+JSON
+)"
+  log "Registering device..."
+  code=$(echo "$body" | curl $CURL_OPTS_COMMON -o /dev/null -w '%{http_code}' \
+         -H "Content-Type: application/json" \
+         -X POST "$CONTROLLER_URL/register" --data @- 2>/dev/null || true)
+  log "Register response: HTTP $code"
+}
+
 fetch_token() {
   log "Fetching token from controller..."
-  newtok="$(curl $CURL_OPTS_COMMON "$CONTROLLER_URL/token/$MAC" | grep -oE '"token"\s*:\s*"[^"]+"' | sed -E 's/.*"token"\s*:\s*"([^"]+)".*/\1/')"
+  resp="$(curl $CURL_OPTS_COMMON -w '\n%{http_code}\n' "$CONTROLLER_URL/token/$MAC" 2>/dev/null || true)"
+  code="$(printf '%s' "$resp" | tail -n1)"
+  body="$(printf '%s' "$resp" | sed '$d')"
+
+  if [ "$code" = "403" ]; then
+    log "Awaiting approval (HTTP 403)."
+    return 2
+  fi
+  if [ "$code" != "200" ]; then
+    log "Token fetch failed: HTTP $code"
+    return 1
+  fi
+
+  newtok="$(echo "$body" | grep -oE '"token"\s*:\s*"[^"]+"' | sed -E 's/.*"token"\s*:\s*"([^"]+)".*/\1/')"
   if [ -n "$newtok" ]; then
-    echo "$newtok" > "$TOKEN_FILE"; chmod 600 "$TOKEN_FILE"
+    umask 077
+    echo "$newtok" > "$TOKEN_FILE"
     TOKEN="$newtok"
     log "New token saved"
+    return 0
   else
-    log "Token fetch failed"
+    log "Token parse failed"
+    return 1
   fi
 }
 
 send_status() {
-  [ ! -f "$TOKEN_FILE" ] && return 1
-  TOKEN="$(cat "$TOKEN_FILE")"
+  if [ ! -f "$TOKEN_FILE" ]; then
+    fetch_token || return $?
+  fi
+
+  TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)"
+  [ -n "$TOKEN" ] || { log "No token available"; return 1; }
+
   log "Sending status update..."
   build_payload
   [ -s "$PAYLOAD_FILE" ] || { log "❌ Payload file does not exist"; return 1; }
@@ -135,19 +251,18 @@ send_status() {
   HTTP_CODE=$(curl $CURL_OPTS_COMMON -o /dev/null -w '%{http_code}' \
     -H "X-API-Token: $TOKEN" \
     -H "Content-Type: application/json" \
-    -X POST "$CONTROLLER_URL/status" --data @"$PAYLOAD_FILE")
+    -X POST "$CONTROLLER_URL/status" --data @"$PAYLOAD_FILE" || true)
   log "Status update response: HTTP $HTTP_CODE"
 
   if [ "$HTTP_CODE" = "403" ]; then
     log "Token rejected, attempting refresh"
-    fetch_token
+    fetch_token || return 1
     TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)"
     [ -n "$TOKEN" ] || { log "Refresh failed"; return 1; }
-
     HTTP_CODE=$(curl $CURL_OPTS_COMMON -o /dev/null -w '%{http_code}' \
       -H "X-API-Token: $TOKEN" \
       -H "Content-Type: application/json" \
-      -X POST "$CONTROLLER_URL/status" --data @"$PAYLOAD_FILE")
+      -X POST "$CONTROLLER_URL/status" --data @"$PAYLOAD_FILE" || true)
     log "Retry status post: HTTP $HTTP_CODE"
     [ "$HTTP_CODE" = "200" ] || return 1
   elif [ "$HTTP_CODE" != "200" ]; then
@@ -158,20 +273,141 @@ send_status() {
   return 0
 }
 
+apply_client_blocklist() {
+  local prefix="wt_block_"
+  local changes=0
+  local mac ip id sec
+
+  echo "[DEBUG] Starting apply_client_blocklist" >> /var/wiretide-debug.log
+
+  # MAC → IP mapping
+  local macip="/tmp/.wt-mac-ip"
+  : > "$macip"
+  if [ -f /tmp/dhcp.leases ]; then
+    awk '{print tolower($2)" "$3}' /tmp/dhcp.leases > "$macip"
+  fi
+
+  # Bestaande regels indexeren (name → @rule[N])
+  local map="/tmp/.wt-block-map"
+  : > "$map"
+  uci -q show firewall | awk -F'[.=]' -v P="$prefix" '
+    $0 ~ /^firewall\.[^=]+\.name=/ {
+      sec=$2
+      val=$0; sub(/^[^=]*=/,"",val)
+      gsub(/\047/,"",val)
+      if (index(val, P)==1) print val" "sec
+  }' > "$map"
+
+  # Verwerk JSON blocklist
+  echo "$1" | grep -o '{[^}]*}' | while read -r entry; do
+    mac=$(echo "$entry" | grep -o '"mac"\s*:\s*"[^"]*"' | cut -d'"' -f4 | tr A-F a-f)
+    enabled=$(echo "$entry" | grep -o '"block_internet"\s*:\s*[^,}]*' | cut -d':' -f2 | tr -d ' ')
+    echo "[DEBUG] Processing mac=$mac enabled=$enabled" >> /var/wiretide-debug.log
+
+    [ "$enabled" != "true" ] && continue
+
+    ip=$(grep -i "^$mac " "$macip" | awk '{print $2}')
+    if [ -z "$ip" ]; then
+      echo "[DEBUG] Skipping $mac: no IP found in DHCP" >> /var/wiretide-debug.log
+      logger -t wiretide "⚠️ No IP found for $mac – skipping"
+      continue
+    fi
+
+    id="${prefix}${mac//:/_}"
+    sec=$(awk -v ID="$id" '$1==ID {print $2}' "$map")
+
+    if [ -n "$sec" ]; then
+      cur_ip=$(uci -q get firewall.$sec.src_ip 2>/dev/null)
+      if [ "$cur_ip" != "$ip" ]; then
+        uci set firewall.$sec.src_ip="$ip"
+        logger -t wiretide "Block internet: updated IP for $mac to $ip"
+        echo "✅ Updated block rule: $mac ($ip)" >> /var/wiretide-debug.log
+        changes=1
+      else
+        echo "[DEBUG] Rule for $mac ($ip) already up to date" >> /var/wiretide-debug.log
+      fi
+    else
+      uci add firewall rule >/dev/null
+      uci set firewall.@rule[-1].name="$id"
+      uci set firewall.@rule[-1].src='lan'
+      uci set firewall.@rule[-1].dest='wan'
+      uci set firewall.@rule[-1].proto='all'
+      uci set firewall.@rule[-1].src_ip="$ip"
+      uci set firewall.@rule[-1].target='REJECT'
+      logger -t wiretide "Block internet: added rule for $mac ($ip)"
+      echo "✅ Added block rule: $mac ($ip)" >> /var/wiretide-debug.log
+      changes=1
+    fi
+
+    # Markeer regel als “gebruikt” → niet verwijderen
+    sed -i "\|^$id |d" "$map"
+  done
+
+  # Verwijder overgebleven oude regels (alleen als MAC nog actief is in lease)
+  if [ -s "$map" ]; then
+    while read -r line; do
+      id=$(echo "$line" | awk '{print $1}')
+      sec=$(echo "$line" | awk '{print $2}')
+      mac=$(echo "$id" | sed "s/^$prefix//; s/_/:/g")
+      ip=$(grep -i "^$mac " "$macip" | awk '{print $2}')
+      if [ -n "$sec" ] && [ -n "$ip" ]; then
+        uci delete firewall.$sec
+        logger -t wiretide "Block internet: removed stale rule $id"
+        echo "❌ Removed stale rule: $id (MAC $mac with IP $ip)" >> /var/wiretide-debug.log
+        changes=1
+      else
+        echo "[DEBUG] Rule $id skipped from removal (offline or unknown)" >> /var/wiretide-debug.log
+      fi
+    done < "$map"
+  fi
+
+  [ "$changes" -eq 1 ] && {
+    uci commit firewall
+    /etc/init.d/firewall reload
+    echo "[DEBUG] Firewall updated" >> /var/wiretide-debug.log
+  }
+
+  echo "[DEBUG] apply_client_blocklist complete" >> /var/wiretide-debug.log
+}
+
+
 apply_firewall_profile() {
   prof="$1"
   [ -n "$prof" ] || return 0
-  echo "$prof" > "$FW_PROFILE_FILE"
-  sync
-  log "Applied firewall profile: $prof"
+
+  src="/etc/wiretide/profiles/firewall-${prof}.conf"
+
+  if [ "$prof" = "custom" ]; then
+    echo "custom" > "$FW_PROFILE_FILE"
+    log "Custom firewall profile detected — skipping apply"
+    return 0
+  fi
+
+  if [ -f "$src" ]; then
+    log "Applying firewall profile '$prof' from: $src"
+
+    cp "$src" /etc/config/firewall
+    sync
+
+    /etc/init.d/firewall stop
+    killall -q -9 ubusd || true
+    sleep 1
+    /etc/init.d/firewall start || /etc/init.d/firewall restart
+
+    echo "$prof" > "$FW_PROFILE_FILE"
+    log "Firewall profile '$prof' applied and reloaded"
+  else
+    log "⚠️ Profile '$prof' not found at $src — skipping"
+  fi
 }
+
 
 ensure_security_logging_rule() {
   enabled="$1"; prefix="$2"
   [ -n "$prefix" ] && echo "$prefix" > "$FW_PREFIX_FILE"
 
   uci -q delete firewall.wtsec_log.extra >/dev/null 2>&1 || true
-  for opt in $(uci show firewall | awk -F'=' '/\.extra=/{print $1}'); do uci -q delete "$opt"; done
+  for opt in $(uci show firewall 2>/dev/null | awk -F'=' '/\.extra=/{print $1}'); do uci -q delete "$opt"; done
 
   if [ "$enabled" = "true" ]; then
     uci -q delete firewall.wtsec_log
@@ -188,57 +424,87 @@ ensure_security_logging_rule() {
     logger "${prefix:-$SEC_PREFIX_DEFAULT} TEST: security logging active"
     log "Security logging enabled"
   else
-    uci set firewall.wtsec_log.enabled='0'
-    uci commit firewall
-    /etc/init.d/firewall reload || true
+    uci set firewall.wtsec_log.enabled='0' 2>/dev/null || true
+    uci commit firewall 2>/dev/null || true
+    /etc/init.d/firewall reload 2>/dev/null || true
     log "Security logging disabled"
   fi
 }
 
+apply_firewall_profile() {
+  prof="$1"
+  [ -z "$prof" ] && return 0
+
+  echo "$prof" > "$FW_PROFILE_FILE"
+
+  if [ "$prof" = "custom" ]; then
+    log "Custom firewall profile active – skipping controller-managed rules"
+    return 0
+  fi
+
+  conf_path="/etc/wiretide/profiles/firewall-${prof}.conf"
+  if [ -f "$conf_path" ]; then
+    log "Applying firewall profile '$prof' from: $conf_path"
+    . "$conf_path"
+    /etc/init.d/firewall reload || /etc/init.d/firewall restart
+    log "Firewall profile '$prof' applied and reloaded"
+  else
+    log "⚠️ No matching config found: $conf_path"
+  fi
+
+  sync
+}
+
+apply_apps_from_pkg() {
+  log "Stub: apply_apps_from_pkg skipped"
+}
+
+
 handle_config() {
-  [ ! -f "$TOKEN_FILE" ] && return
+  [ ! -f "$TOKEN_FILE" ] && return 0
   TOKEN="$(cat "$TOKEN_FILE")"
-  json=$(curl $CURL_OPTS_COMMON -H "X-API-Token: $TOKEN" -H "X-MAC: $MAC" -X GET "$CONTROLLER_URL/config")
-  [ -n "$json" ] || { log "No config"; return 0; }
+  raw=$(curl $CURL_OPTS_COMMON -H "X-API-Token: $TOKEN" -H "X-MAC: $MAC" -X GET "$CONTROLLER_URL/config")
+  [ -n "$raw" ] || { log "No config"; return 0; }
 
-  pkg=$(echo "$json" | jq -c '.package // {}')
-  [ -n "$pkg" ] || { log "No package"; return 0; }
+  command -v jq >/dev/null 2>&1 || { log "jq not present; skipping config apply"; return 0; }
 
-  prof=$(echo "$pkg" | jq -r '.firewall_profile // empty')
-  [ -n "$prof" ] && apply_firewall_profile "$prof"
+  pkg_json_str=$(printf '%s' "$raw" | jq -r '.package_json // empty')
+  pkg_obj_compact=$(printf '%s' "$raw" | jq -c '.package // {}')
+  sha_srv=$(printf '%s' "$raw" | jq -r '.sha256 // empty')
 
-  sec_enabled=$(echo "$pkg" | jq -r '.security_logging.enabled // false')
-  sec_prefix=$(echo "$pkg" | jq -r '.security_logging.prefix // "'"$SEC_PREFIX_DEFAULT"'"')
+  if ! verify_pkg_sha "$pkg_json_str" "$sha_srv" "$pkg_obj_compact"; then
+    return 0
+  fi
+
+  tmpfile="/tmp/.wt-pkg.$$"
+  if [ -n "$pkg_json_str" ] && [ "$pkg_json_str" != "null" ]; then
+    printf '%s\n' "$pkg_json_str" > "$tmpfile"
+  else
+    printf '%s\n' "$pkg_obj_compact" > "$tmpfile"
+  fi
+
+  jq . "$tmpfile" >&2
+
+  prof=$(jq -r '.firewall_profile // ""' "$tmpfile")
+  sec_enabled=$(jq -r '.security_logging.enabled // false' "$tmpfile")
+  sec_prefix=$(jq -r '.security_logging.prefix // "'"$SEC_PREFIX_DEFAULT"'"' "$tmpfile")
+  apps_json="$(cat "$tmpfile")"
+  client_controls=$(jq -c '.client_controls // empty' "$tmpfile")
+
+  rm -f "$tmpfile"
+
+  log "DEBUG: extracted prof=$prof sec_enabled=$sec_enabled sec_prefix=$sec_prefix"
+  apply_firewall_profile "$prof"
   ensure_security_logging_rule "$sec_enabled" "$sec_prefix"
+  apply_apps_from_pkg "$apps_json"
+
+  [ -n "$client_controls" ] && apply_client_blocklist "$client_controls"
+
+  log "Config applied."
+  log "DEBUG: pkg_compact = $apps_json"
+  return 0
 }
 
-apply_apps() {
-  [ ! -f "$TOKEN_FILE" ] && return
-  TOKEN="$(cat "$TOKEN_FILE")"
-  json=$(curl $CURL_OPTS_COMMON -H "X-API-Token: $TOKEN" -H "X-MAC: $MAC" -X GET "$CONTROLLER_URL/config")
-  [ -z "$json" ] && { log "No config for apps"; return; }
-
-  apps=$(echo "$json" | jq -r '.package.apps[]?' 2>/dev/null)
-  [ -z "$apps" ] && return
-
-  for app in $apps; do
-    case "$app" in
-      adblock|banip)
-        if opkg list-installed "$app" >/dev/null 2>&1; then
-          log "$app already installed"
-        else
-          log "Installing $app..."
-          opkg update >/dev/null 2>&1
-          out=$(opkg install "$app" 2>&1)
-          log "$app install result:\n$out"
-        fi
-        ;;
-      *)
-        log "Ignoring unsupported app: $app"
-        ;;
-    esac
-  done
-}
 
 
 # ========== Main ==========
@@ -263,6 +529,24 @@ DEVICE_TYPE="${DEVICE_TYPE:-router}"
 
 log "Starting $VERSION (PID $$)"
 log "Controller=$CONTROLLER_URL, MAC=$MAC, Hostname=$HOSTNAME, Interval=${INTERVAL}s"
+
+# NEW: initial registration (idempotent)
+register_device
+
+# NEW: token bootstrap (backoff tot approval/token)
+if [ ! -f "$TOKEN_FILE" ]; then
+  backoff=15
+  while [ ! -f "$TOKEN_FILE" ]; do
+    if fetch_token; then
+      break
+    else
+      log "No token yet; sleeping ${backoff}s"
+      sleep "$backoff"
+      backoff=$(( backoff * 2 ))
+      [ "$backoff" -gt 300 ] && backoff=300
+    fi
+  done
+fi
 
 while true; do
   send_status || log "Status post failed"

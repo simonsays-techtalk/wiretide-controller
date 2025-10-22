@@ -103,7 +103,7 @@ async def system_info():
     else:
         uptime = "unknown"
 
-    version = "V0.5.5 Alpha"
+    version = "V1.0.0 Alpha"
 
     cert_path = os.path.join(CERT_DIR, "wiretide-ca.crt")
     if os.path.exists(cert_path):
@@ -137,7 +137,7 @@ async def system_info():
         "version": version,
         "cert_type": cert_type,
         "cert_expiry": expiry,
-        "agent_version": "0.5.5 Alpha",
+        "agent_version": "V1.0.0. Alpha",
         "agent_checksum": checksum,
         "agent_url": agent_url
     })
